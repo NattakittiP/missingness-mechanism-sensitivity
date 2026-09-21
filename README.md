@@ -9,7 +9,7 @@ Code and results for a study of how the **mechanism** of missing data — not ju
 - **RQ3 (deployment shift)**: a model trained under MCAR/MAR loses about twice as much raw AUROC when deployed where missingness is actually MNAR-Y (~−0.030) as the reverse (~−0.016 to −0.017) — but the *selection* decision breaks the other way: a model selected under MNAR-Y is never the correct choice once deployed under MCAR/MAR (100% displacement).
 - **RQ4 (shortcut attribution)**: destroying the missingness pattern at test time (permuting which labs are "missing," holding values and model fixed) costs the model ~1 AUROC point at the frozen main MNAR-Y strength, but 9–11 AUROC points at a stronger sensitivity setting — direct, quantitative evidence that the model is partly reading the missingness pattern itself as a proxy for the outcome, and that this effect is highly strength-dependent.
 
-Full results, figures, and caveats: see `docs/`.
+Full results, and caveats: see `docs/`.
 
 ## Repository structure
 
