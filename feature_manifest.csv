@@ -1,0 +1,44 @@
+feature,type,available_at_prediction_time,native_missing_pct,model_input,maskable,mar_driver
+hadm_id,identifier,no (excluded — not a temporal feature),0.0,no,no,no
+subject_id,identifier,no (excluded — not a temporal feature),0.0,no (group-split key only),no,no
+label_mortality,outcome,n/a (outcome),0.0,outcome,no,no
+gender,baseline demographic,yes (available at admission / t=0),0.0,yes,no,no
+anchor_age,baseline demographic,yes (available at admission / t=0),0.0,yes,no,optional sensitivity
+race,baseline demographic,yes (available at admission / t=0),0.0,yes,no,no
+marital_status,baseline demographic,yes (available at admission / t=0),2.777,yes,no,no
+insurance,baseline demographic,yes (available at admission / t=0),1.285,yes,no,sensitivity only
+admission_type,admission-context,yes (available at admission / t=0),0.0,yes,no,main
+admission_location,admission-context,yes (available at admission / t=0),0.0,yes,no,optional/secondary
+discharge_location,post-index,no (post-index; excluded regardless),15.652,no (excluded),no,no
+anchor_year,temporal,yes (available at admission / t=0),0.0,sensitivity,no,no
+anchor_year_group,temporal,yes (available at admission / t=0),0.0,sensitivity,no,no
+lab_50802,laboratory,"yes (within first-24h window, per confirmed landmark)",81.393,yes,yes,no
+lab_50820,laboratory,"yes (within first-24h window, per confirmed landmark)",80.335,yes,yes,no
+lab_50821,laboratory,"yes (within first-24h window, per confirmed landmark)",81.393,yes,yes,no
+lab_50861,laboratory,"yes (within first-24h window, per confirmed landmark)",53.405,yes,yes,no
+lab_50863,laboratory,"yes (within first-24h window, per confirmed landmark)",54.719,yes,yes,no
+lab_50868,laboratory,"yes (within first-24h window, per confirmed landmark)",9.104,yes,yes,no
+lab_50878,laboratory,"yes (within first-24h window, per confirmed landmark)",53.199,yes,yes,no
+lab_50882,laboratory,"yes (within first-24h window, per confirmed landmark)",9.104,yes,yes,no
+lab_50885,laboratory,"yes (within first-24h window, per confirmed landmark)",54.605,yes,yes,no
+lab_50893,laboratory,"yes (within first-24h window, per confirmed landmark)",17.016,yes,yes,no
+lab_50902,laboratory,"yes (within first-24h window, per confirmed landmark)",8.465,yes,yes,no
+lab_50912,laboratory,"yes (within first-24h window, per confirmed landmark)",6.967,yes,yes,no
+lab_50931,laboratory,"yes (within first-24h window, per confirmed landmark)",9.325,yes,yes,no
+lab_50960,laboratory,"yes (within first-24h window, per confirmed landmark)",15.326,yes,yes,no
+lab_50970,laboratory,"yes (within first-24h window, per confirmed landmark)",17.556,yes,yes,no
+lab_50971,laboratory,"yes (within first-24h window, per confirmed landmark)",8.018,yes,yes,no
+lab_50983,laboratory,"yes (within first-24h window, per confirmed landmark)",8.387,yes,yes,no
+lab_51006,laboratory,"yes (within first-24h window, per confirmed landmark)",8.011,yes,yes,no
+lab_51221,laboratory,"yes (within first-24h window, per confirmed landmark)",3.643,yes,yes,no
+lab_51222,laboratory,"yes (within first-24h window, per confirmed landmark)",5.49,yes,yes,no
+lab_51248,laboratory,"yes (within first-24h window, per confirmed landmark)",5.752,yes,yes,no
+lab_51249,laboratory,"yes (within first-24h window, per confirmed landmark)",5.745,yes,yes,no
+lab_51250,laboratory,"yes (within first-24h window, per confirmed landmark)",5.752,yes,yes,no
+lab_51265,laboratory,"yes (within first-24h window, per confirmed landmark)",5.106,yes,yes,no
+lab_51274,laboratory,"yes (within first-24h window, per confirmed landmark)",39.074,yes,yes,no
+lab_51275,laboratory,"yes (within first-24h window, per confirmed landmark)",41.439,yes,yes,no
+lab_51277,laboratory,"yes (within first-24h window, per confirmed landmark)",5.767,yes,yes,no
+lab_51279,laboratory,"yes (within first-24h window, per confirmed landmark)",5.752,yes,yes,no
+lab_51301,laboratory,"yes (within first-24h window, per confirmed landmark)",5.696,yes,yes,no
+lab_52172,laboratory,"yes (within first-24h window, per confirmed landmark)",53.1,yes,yes,no

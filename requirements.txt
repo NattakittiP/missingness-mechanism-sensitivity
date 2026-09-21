@@ -1,0 +1,16 @@
+# Tested with Python 3.11.
+# Exact versions were not pinned during the original experiment runs; the
+# floors below reflect features actually relied on by the code in code/.
+
+numpy>=1.24
+pandas>=1.5
+scikit-learn>=1.8          # StratifiedGroupKFold is available from 0.24+, but the
+                            # experiments were run against 1.8.0
+xgboost>=1.7
+scipy>=1.10
+statsmodels>=0.14           # used by code/PHASE_STATS_LAYER/phase_stats_layer.py
+tqdm>=4.65                  # used by the vendored jcsse_audit_runner_tqdm_hardened.py
+matplotlib>=3.7             # used by code/FIGURES/make_figures.py
+
+# Testing (optional, only needed to run the test_*.py files under code/)
+pytest>=7.0
