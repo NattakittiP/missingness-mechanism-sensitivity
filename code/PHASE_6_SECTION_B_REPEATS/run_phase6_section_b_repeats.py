@@ -1,66 +1,4 @@
-"""
-Phase 6, Section B -- REPEATED-DRAW companion driver.
-
-WHY THIS EXISTS
-----------------
-`run_phase6_rq4.py`'s Section B (test-only permutation ablation, the RQ4
-flagship result: "-9 to -11 AUROC points at OR=4 vs. only ~1 point at OR=2")
-draws exactly ONE random permutation of the synthetic mask per (rate, OR,
-fold) cell. That single draw is fully reproducible (a documented, fold/rate/
-OR-dependent seed), but it means the reported `delta_auroc` at each cell is a
-single point estimate of an effect that could, in principle, vary from one
-random reshuffling to another. This driver characterizes that variability
-directly: it repeats the permutation-and-rescore step many times per cell
-(default 30) and reports the resulting distribution (mean, SD, bootstrap CI)
-instead of a single number.
-
-WHAT THIS DOES **NOT** CHANGE
-------------------------------
-- The train-time masking, the frozen model itself, and `auroc_before` are all
-  identical to the original Section B -- computed with the exact same code
-  path, called once per cell (never rerun per draw).
-- `run_phase6_rq4.py` and its outputs (`phase6_permutation.csv`, checkpoints)
-  are never read, imported from, or written to by this script. This is a
-  wholly separate, additive driver, per this project's established pattern
-  (e.g. Phase 8's calibration backfill alongside Phase 4-6's original
-  drivers). Nothing about the original Phase 6 result changes or is at risk
-  of being overwritten.
-
-WHAT VARIES ACROSS DRAWS
---------------------------
-Only the TEST-TIME row permutation of the synthetic (MNAR-Y-injected) mask
-component (`syn_mask_te`) -- exactly the same operation the original driver
-performs, just repeated with different, independently seeded permutation
-arrays. `X_tr`, `y_tr`, `y_te`, the fitted model, and `auroc_before` are fixed
-across all draws within a cell; only which permutation is applied to
-`syn_mask_te`, and therefore `auroc_after`, changes draw to draw.
-
-BUILT-IN CORRECTNESS CHECK
-----------------------------
-Draw index 0 in every cell uses the EXACT SAME seed-entropy tuple the
-original driver used -- `(MASK_SEED, PERMUTATION_SEED_OFFSET, fold_id,
-round(rate*100), round(or_val*10))`, no trailing draw-id component -- so its
-`auroc_after` should reproduce the original run's value for that cell either
-bit-for-bit (non-xgb-selected folds) or within the same small,
-already-documented cross-environment xgboost floating-point noise band used
-throughout this project's Phase 8 drivers (xgb-selected folds; see
-`run_phase8_calibration.py`'s DRIFT_WARN_THRESHOLD_XGB). Draws 1..N-1 use a
-6-element seed tuple (the same 5 elements plus an explicit `draw_id`), which
-is guaranteed never to collide with the 5-element draw-0 entropy pool (numpy's
-SeedSequence treats different-length input sequences as distinct entropy;
-additionally verified empirically at the end of the run -- see
-`_verify_no_duplicate_permutations` -- and independently confirmed during
-code review by directly comparing `np.random.default_rng` outputs for the
-5-tuple vs. 6-tuple (draw_id 0..50) forms of the real constants used here).
-
-This driver refits `fit_and_select_all_families` ONCE per (rate, OR, fold)
-cell (same cost as the original driver's one fit per cell -- NOT once per
-draw), then loops over N_REPEATS cheap reshuffle+rescore passes. Expected
-added wall time: about the same as one full original Section B run (~20
-cells x ~80s refit each) plus a small, fast tail for the extra scoring passes
--- see the module-level docstring's "Expected wall time" note near
-`run_all_repeats`.
-"""
+"""Repeated-draw companion to Phase 6's permutation ablation, characterizing draw-to-draw variability of the RQ4 effect."""
 import argparse
 import hashlib
 import pickle
@@ -82,11 +20,9 @@ warnings.simplefilter("once")
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*'n_jobs' has no effect.*", category=FutureWarning)
 
-OUTER_SEED = p4.OUTER_SEED         # 2026 -- same as Phase 4/5/6
-MASK_SEED = p4.MASK_SEED           # 20260917 -- same as Phase 4/5/6
+OUTER_SEED = p4.OUTER_SEED
+MASK_SEED = p4.MASK_SEED
 
-# Identical to run_phase6_rq4.py's Section B constants -- MUST stay identical
-# for draw 0's seed to reproduce the original result.
 PERMUTATION_RATES = [0.30, 0.40]
 PERMUTATION_ORS = {2.0: p4.THETA_MAIN, 4.0: float(np.log(4.0))}
 PERMUTATION_SEED_OFFSET = 555
@@ -94,16 +30,11 @@ PERMUTATION_SEED_OFFSET = 555
 N_OUTER = 5
 RESULTS_DIR = Path("results/phase6_section_b_repeats")
 
-# xgb cross-environment floating-point noise band, same convention as
-# run_phase8_calibration.py (DRIFT_WARN_THRESHOLD_XGB / DRIFT_WARN_THRESHOLD_OTHER).
 DRIFT_INFO_THRESHOLD = 1e-6
 DRIFT_WARN_THRESHOLD_XGB = 0.03
 DRIFT_WARN_THRESHOLD_OTHER = 1e-6
 
 
-# Same cloud-sandbox last-resort fallback pattern as run_phase6_rq4.py's own
-# _PHASE4_CSV_CONTAINER -- covers the documented DASA2026/ upload layout when
-# this script isn't run from a sibling-folder layout relative to PHASE_6_RQ4/.
 _PHASE6_PERMUTATION_CSV_CONTAINER = (
     "/mnt/user-data/uploads/DASA2026/PHASE_6_RQ4/results/phase6/phase6_permutation.csv"
 )
@@ -152,13 +83,7 @@ def _resolve_original_permutation_csv(cli_arg: Optional[str], log) -> Optional[p
 
 
 def _perm_seed_entropy(fold_id: int, rate: float, or_val: float, draw_id: int):
-    """draw_id == 0 reproduces the ORIGINAL driver's exact seed (5-tuple, no
-    draw_id component) -- this is deliberate, not an off-by-one: it is what
-    lets draw 0 serve as a bit-for-bit correctness check against
-    phase6_permutation.csv. draw_id >= 1 gets a 6-tuple that numpy's
-    SeedSequence treats as categorically distinct entropy from the 5-tuple
-    case (different sequence length), so there is no risk of draw 1..N-1
-    silently colliding with draw 0's stream."""
+    """Derives the permutation seed for a given draw; draw 0 reproduces the original driver's exact seed."""
     base = (MASK_SEED, PERMUTATION_SEED_OFFSET, fold_id, int(round(rate * 100)), int(round(or_val * 10)))
     if draw_id == 0:
         return base
@@ -176,14 +101,6 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
         with open(ckpt, "rb") as f:
             rows = pickle.load(f)
         if len(rows) != n_repeats:
-            # FIX (code review, 2026-09-19): a checkpoint written by an
-            # earlier invocation with a DIFFERENT --n-repeats would otherwise
-            # be returned silently as-is, under-reporting (or padding) the
-            # requested draw count without any signal that this happened.
-            # This does not recompute/extend the checkpoint (the frozen model
-            # is not itself persisted, so extending it cheaply would require
-            # re-fitting), but it makes the mismatch loud rather than silent,
-            # per this project's fail-loud convention.
             log(f"  [{cond_id} fold {fold_id}] WARNING: checkpoint has {len(rows)} draws but this run "
                 f"requested n_repeats={n_repeats} -- returning the EXISTING {len(rows)}-draw checkpoint "
                 f"UNCHANGED (not recomputed/extended). Delete {ckpt} and rerun if you want {n_repeats} "
@@ -219,8 +136,6 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
     for col in genmod.ELIGIBLE_LAB_COLS:
         X_te_masked_orig.loc[final_mask_te_orig[col].to_numpy(), col] = np.nan
 
-    # Fit ONCE per cell -- identical call to the original driver's Section B,
-    # same seed, same masked training data -> same frozen model.
     t0 = time.time()
     fit_result = selv2.fit_and_select_all_families(
         X_tr_masked, y_tr, g_tr, num_cols, cat_cols, seed=OUTER_SEED
@@ -231,16 +146,6 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
 
     auroc_before, ap_before, brier_before = selv2.evaluate_frozen_model(final_model, X_te_masked_orig, y_te)
 
-    # FIX (code review, 2026-09-19): under --smoke-test, n_outer=2 (vs the
-    # ORIGINAL driver's fixed 5), so StratifiedGroupKFold produces a
-    # completely different train/test partition -- "fold_id 1" here is NOT
-    # the same test-set rows as "fold_id 1" in the original 5-fold
-    # phase6_permutation.csv. The cross-checks below still run (a wildly
-    # large drift would still be a useful red flag), but a small/OK drift
-    # under --smoke-test is a coincidence of similar data, not a real
-    # confirmation that draw 0 reproduced the original permutation -- that
-    # gate can only be exercised with the real 5-fold split. Caveat every
-    # cross-check log line so this isn't mistaken for the genuine gate.
     smoke_caveat = (
         " [NOTE: under --smoke-test (n_outer=2) this compares against a DIFFERENT outer-fold "
         "partition than the original 5-fold run -- fold_id here is not the same test rows as the "
@@ -249,10 +154,6 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
         if smoke_test else ""
     )
 
-    # Built-in correctness check: does refitting reproduce Phase 4/6's
-    # already-established model for this exact (rate, fold) via the shared
-    # MASK_SEED/OUTER_SEED convention? Compare against the ORIGINAL driver's
-    # own auroc_before for the same cell, if available.
     if original_df is not None:
         orig_row = original_df[(original_df["rate"] == rate) & (original_df["or_value"] == or_val)
                                 & (original_df["fold_id"] == fold_id)]
@@ -296,30 +197,10 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
             auroc_before=auroc_before, ap_before=ap_before, brier_before=brier_before,
             auroc_after=auroc_after, ap_after=ap_after, brier_after=brier_after,
             delta_auroc=auroc_after - auroc_before,
-            # FIX (code review, 2026-09-19): Python's built-in hash() salts
-            # str/bytes with a per-PROCESS random seed (PYTHONHASHSEED) by
-            # default -- confirmed empirically (two `python3 -c` invocations
-            # of `hash(np.array([3,1,2]).tobytes())` returned different
-            # values). Within a single run this happened to be harmless for
-            # `_verify_no_duplicate_permutations`'s actual use (every row for
-            # a given cell is produced -- and hashed -- inside one process,
-            # either freshly here or all together when an earlier checkpoint
-            # is unpickled), but `perm_idx_hash` is also PERSISTED to disk
-            # (the pickle checkpoint and the final CSV/pkl), where a salted
-            # value is silently meaningless for any comparison ACROSS runs/
-            # processes (e.g. confirming two separate invocations drew the
-            # same permutation) -- exactly the kind of cross-environment
-            # reproducibility check this project relies on elsewhere. Use a
-            # process-independent digest instead so the stored value is a
-            # genuinely stable identifier for the permutation.
             perm_idx_hash=hashlib.sha256(perm_idx.tobytes()).hexdigest(),
         )
         rows.append(row)
 
-    # Draw-0 cross-check against the original driver's own auroc_after (the
-    # single most important correctness gate in this whole script: if this
-    # doesn't match, the two drivers are NOT evaluating the same permutation
-    # at "draw 0" and something is wrong upstream of the repeats themselves).
     if original_df is not None:
         orig_row = original_df[(original_df["rate"] == rate) & (original_df["or_value"] == or_val)
                                 & (original_df["fold_id"] == fold_id)]
@@ -347,9 +228,7 @@ def run_repeats_for_cell(df: pd.DataFrame, X, y, groups, num_cols, cat_cols,
 
 
 def _verify_no_duplicate_permutations(all_rows: List[Dict[str, Any]], log) -> None:
-    """Belt-and-suspenders check: within each (rate, or_value, fold_id) cell,
-    confirm no two draws produced byte-identical permutation arrays (which
-    would silently collapse the effective sample size below n_repeats)."""
+    """Confirms no two draws in a cell produced byte-identical permutation arrays."""
     df = pd.DataFrame(all_rows)
     n_dupe_groups = 0
     for (rate, orv, fid), sub in df.groupby(["rate", "or_value", "fold_id"]):
@@ -366,13 +245,7 @@ def _verify_no_duplicate_permutations(all_rows: List[Dict[str, Any]], log) -> No
 def run_all_repeats(n_repeats: int = 30, smoke_test: bool = False,
                      data_path_arg: Optional[str] = None,
                      original_permutation_csv_arg: Optional[str] = None):
-    """Expected wall time (non-smoke): 4 (rate,OR) cells x 5 folds = 20 cells,
-    each costing one fit_and_select_all_families call (~75-85s, same cost as
-    the original Section B's per-cell fit, per phase6_permutation.csv's own
-    fit_seconds column) plus n_repeats cheap reshuffle+rescore passes
-    (sub-second each even at n_repeats=30-50) -> roughly 25-30 minutes total,
-    similar order of magnitude to Phase 8's calibration backfill. Checkpointed
-    per cell; safe to interrupt and resume."""
+    """Runs the repeated permutation-and-rescore passes across the rate/OR/fold grid, checkpointed per cell."""
     results_dir = Path("results/phase6_section_b_repeats_smoke") if smoke_test else RESULTS_DIR
     results_dir.mkdir(parents=True, exist_ok=True)
     log = p4.make_logger(results_dir / "run.log")

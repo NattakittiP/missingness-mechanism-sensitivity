@@ -1,4 +1,4 @@
-# jcsse_audit_runner.py (REV2) — Locked to JCSSE-Idea + fixes requested (100%)
+# base_model_runner.py (REV2) — Locked to JCSSE-Idea + fixes requested (100%)
 #
 # Fixes included:
 # 1) Compute winner flip % (RQ3) and export winner_flip_summary.csv + per-seed winners
@@ -16,7 +16,7 @@
 #   B: Synthetic_Dataset_1500_Patients_precise.csv (TG4h top quartile label; optional id col)
 #
 # Run:
-#   python jcsse_audit_runner.py
+#   python base_model_runner.py
 
 import os
 import json

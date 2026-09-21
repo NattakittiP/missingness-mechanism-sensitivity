@@ -1,67 +1,4 @@
-"""
-Phase 8, Part 4 of 4 — Alternative-split (S1) sensitivity (implementation-order
-item 11, final sub-part).
-
-WHAT THIS IS: `protocol_v2.yaml`'s `split:` block freezes the headline split as
-`StratifiedGroupKFold(subject_id)` (patients never split across outer-train/
-outer-test) and separately records a `legacy_sensitivity_split: StratifiedKFold`
-with the note `"no patient separation -- do not use as headline result"`. Every
-result in Phases 3-8 Parts 1-3 uses the group-safe split. This driver runs the
-SAME RQ1 rate-sweep grid Phase 4 ran, but under plain `StratifiedKFold` (no
-`subject_id` grouping) instead -- the sensitivity question is: does RQ1's
-headline finding (baseline_selection_displacement_rate rises sharply with rate
-for MCAR/MAR but stays at 0% for MNAR-Y) survive when patient-level separation
-between outer-train and outer-test is removed?
-
-WHY THIS MATTERS METHODOLOGICALLY: Dataset A is one row per admission, and a
-single patient (subject_id) can have multiple admissions. Under
-StratifiedGroupKFold, a patient's admissions are guaranteed to land entirely
-in outer-train or entirely in outer-test. Under plain StratifiedKFold, the
-same patient's admissions can be split across both -- if a patient's
-admissions are similar to each other (same baseline labs, same eventual
-outcome), the model could partially "recognize" a test patient from having
-seen a different admission of theirs in training, inflating outer-test
-performance relative to genuine generalization to NEW patients. This is
-exactly the leakage `StratifiedGroupKFold` was adopted specifically to
-prevent (Phase 0 audit). S1 quantifies how much this would have mattered if
-that precaution had not been taken.
-
-SCOPE (a deliberate reduction from Phase 4's full 14-condition grid, to keep
-this the last and most expensive of the 4 item-11 sub-parts affordable):
-RQ1's rate sweep ONLY -- 3 mechanisms (mcar, mar, mnar_y) x 4 rates
-(0.10, 0.20, 0.30, 0.40) = 12 conditions, PLUS one fresh q=0 baseline
-(mechanism-independent by construction, reused across all 3 mechanism labels,
-exactly Phase 4's own q00-reuse convention) = 13 conditions total x 5 outer
-folds x 5 model families with full GridSearchCV tuning each -- the same
-per-condition cost as Phase 4, so expect similar wall time (Phase 4 measured
-~493s/condition on the user's machine, i.e. budget ~1.8h for 13 conditions).
-RQ2's OR-sweep is explicitly OUT OF SCOPE here: RQ2 asks a strength question
-(how does MNAR-Y's effect size change AUROC/displacement), which is
-orthogonal to what S1 is testing (does the OUTER SPLIT mechanism change the
-answer) -- re-deriving RQ2 under S1 as well would double this driver's cost
-for a question this project has not asked. If the user wants it later, this
-script's condition-building logic (`build_condition_grid`) can be extended
-the same way `run_phase4_rq1_rq2.py`'s was, following the same pattern.
-
-CRITICAL DIFFERENCE FROM PHASE 4's DRIVER (besides the splitter itself): Phase
-4's `run_condition_with_injection` asserts
-`set(groups[tr_idx]).isdisjoint(set(groups[te_idx]))` -- a group-safety
-invariant that is BY DESIGN violated under S1 (that violation is the entire
-point of this sensitivity check), so that assertion is replaced here with a
-per-fold DIAGNOSTIC that measures and logs exactly how much subject_id
-overlap plain StratifiedKFold introduces (fraction of outer-test admissions
-whose subject_id also appears in that fold's outer-train), written to
-`phase8_s1_overlap_diagnostics.csv`. Everything else -- fold-safe masking
-(alpha_j fit on outer-train only, same generator applied unchanged to
-outer-train/outer-test), selection_v2's inner-CV-only family selection
-(`run_outer_fold`, reused verbatim, unmodified), the metrics_v2 layer,
-checkpointing -- is identical in mechanics to Phase 4's driver; only the
-outer splitter class and its `.split(...)` call signature differ.
-
-Run with:   python3 run_phase8_s1_sensitivity.py
-Smoke-test: python3 run_phase8_s1_sensitivity.py --smoke-test
-            (1 condition, 2 outer folds instead of 5.)
-"""
+"""Phase 8 driver, part 4 of 4: reruns the RQ1 rate sweep under a legacy split with no patient separation, as a sensitivity check."""
 
 from __future__ import annotations
 
@@ -81,11 +18,6 @@ import missingness_generator_v2 as genmod
 import selection_v2 as selv2
 import metrics_v2 as met
 
-# Same warning-visibility restoration as run_phase4_rq1_rq2.py/run_phase6_rq4.py
-# -- importing selection_v2 execs base_runner, which globally silences
-# UserWarning/FutureWarning for the rest of the process; restore default
-# visibility (minus two known-benign, already-audited sklearn deprecation
-# notices) so a multi-hour run doesn't hide a genuine ConvergenceWarning.
 warnings.resetwarnings()
 warnings.simplefilter("once")
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
@@ -111,19 +43,15 @@ def _resolve_data_path(cli_arg: Optional[str]) -> str:
     )
 
 
-OUTER_SEED = 2026             # same seed as every other Phase 3-8 driver, for consistency (NOT for fold-identity --
-                               # StratifiedKFold and StratifiedGroupKFold produce different partitions even at the same seed)
-MASK_SEED = 20260917          # same CRN convention as every other driver
+OUTER_SEED = 2026
+MASK_SEED = 20260917
 N_OUTER = 5
-THETA_MAIN = 0.693147         # ln(2), OR=2 -- frozen MAR + MNAR-Y main strength
+THETA_MAIN = 0.693147
 RATES_MAIN = [0.10, 0.20, 0.30, 0.40]
 
 RESULTS_DIR = Path("results/phase8_s1_sensitivity")
 
 
-# ---------------------------------------------------------------------------
-# Condition grid (RQ1 rate sweep only -- see module docstring for scope note)
-# ---------------------------------------------------------------------------
 
 def build_condition_grid() -> List[Dict[str, Any]]:
     conditions: List[Dict[str, Any]] = []
@@ -138,11 +66,6 @@ def build_condition_grid() -> List[Dict[str, Any]]:
     return conditions
 
 
-# ---------------------------------------------------------------------------
-# Fold-safe masking -- IDENTICAL logic to run_phase4_rq1_rq2.py's
-# _prepare_X_y_groups / _fit_generator_and_drivers (copied verbatim; only the
-# outer splitter differs in this driver -- see run_condition_with_injection).
-# ---------------------------------------------------------------------------
 
 def _prepare_X_y_groups(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, List[str], List[str]]:
     y = df[genmod.LABEL_COL].astype(int).to_numpy()
@@ -188,14 +111,7 @@ def run_condition_with_injection(
     mask_seed: int = MASK_SEED,
     n_outer: int = N_OUTER,
 ) -> Tuple[List[Any], List[Dict[str, Any]]]:
-    """Same fold-safe masking + inner-CV-only selection as
-    run_phase4_rq1_rq2.py's run_condition_with_injection, but split with
-    plain StratifiedKFold(y) instead of StratifiedGroupKFold(y, subject_id)
-    -- S1, the legacy/sensitivity split per protocol_v2.yaml. subject_id is
-    still computed (needed for the overlap diagnostic and passed through to
-    selection_v2.run_outer_fold's internal calibration carve-out, which
-    remains group-aware -- S1's definition concerns the OUTER split only, per
-    protocol_v2.yaml's `legacy_sensitivity_split` entry)."""
+    """Same fold-safe masking and inner-CV-only selection as Phase 4, but split with plain StratifiedKFold instead of grouped."""
     X, y, groups, num_cols, cat_cols = _prepare_X_y_groups(df)
     outer_splitter = StratifiedKFold(n_splits=n_outer, shuffle=True, random_state=seed)
 
@@ -208,10 +124,6 @@ def run_condition_with_injection(
         X_te = X.iloc[te_idx].reset_index(drop=True)
         y_te = y[te_idx]
 
-        # S1's defining property: subject_id is explicitly NOT used for the
-        # split, so overlap is expected -- measure and log it rather than
-        # asserting disjointness (that assertion, present in Phase 4's
-        # driver, would fail here by construction).
         train_subjects = set(groups[tr_idx])
         test_subjects = set(groups[te_idx])
         overlap_subjects = train_subjects & test_subjects
@@ -227,7 +139,7 @@ def run_condition_with_injection(
             mechanism, rate, theta, df_tr, y_tr, nat_mask_tr, df_te, y_te
         )
 
-        rng = np.random.default_rng(mask_seed)  # fresh per (mechanism, rate, fold) cell -- same CRN convention
+        rng = np.random.default_rng(mask_seed)
         syn_mask_tr = genmod.apply_synthetic_mask(nat_mask_tr, driver_tr, gen, rng)
         syn_mask_te = genmod.apply_synthetic_mask(nat_mask_te, driver_te, gen, rng)
 
@@ -273,18 +185,10 @@ def run_condition_with_injection(
 
 
 def load_or_compute_natural_q0(df: pd.DataFrame, n_outer: int = N_OUTER) -> Tuple[List[Any], List[Dict[str, Any]]]:
-    """Unlike Phase 4's driver, this is NEVER reused from an earlier phase's
-    pickle -- Phase 3's Natural/q=0 validation used StratifiedGroupKFold, a
-    DIFFERENT split from S1's plain StratifiedKFold, so the fold partitions
-    (and therefore the results) are not interchangeable. Always computed
-    fresh here, once, then reused across the 3 mechanism labels exactly like
-    Phase 4's own q00-reuse convention."""
+    """Computes the q=0 baseline fresh under this driver's split, since Phase 3's grouped-split checkpoint isn't interchangeable."""
     return run_condition_with_injection(df, mechanism="mcar", rate=0.0, theta=0.0, n_outer=n_outer)
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,7 +229,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     all_diagnostics: List[Dict[str, Any]] = []
     condition_meta: Dict[str, Dict[str, Any]] = {}
 
-    # --- q=0 (Natural under S1), shared across all 3 mechanisms ---
     q0_ckpt = results_dir / "natural_q0.pkl"
     if q0_ckpt.exists():
         log("q=0 (Natural, S1): checkpoint already exists, loading")
@@ -345,7 +248,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
         condition_meta[f"{mech}_q00"] = dict(rq="RQ1_S1", mechanism=mech, rate=0.0, theta=0.0,
                                                or_value=(None if mech == "mcar" else 2.0))
 
-    # --- fresh conditions ---
     for i, c in enumerate(conditions, start=1):
         cid = c["condition_id"]
         ckpt = results_dir / f"{cid}.pkl"
@@ -382,10 +284,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     log.close()
 
 
-# ---------------------------------------------------------------------------
-# Aggregation -- same shape as run_phase4_rq1_rq2.py's aggregate_and_save,
-# retargeted to phase8_s1_* filenames, plus the new overlap-diagnostics CSV.
-# ---------------------------------------------------------------------------
 
 def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir: Path, log):
     rows = []
@@ -426,12 +324,6 @@ def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir
     diag_df.to_csv(results_dir / "phase8_s1_manipulation_check.csv", index=False)
     log(f"Wrote {results_dir / 'phase8_s1_manipulation_check.csv'}")
 
-    # Overlap diagnostic in its own file too (the key S1-specific quantity):
-    # how much patient-level leakage plain StratifiedKFold introduces, per
-    # (condition, fold) -- present in every diag row via n_train_subjects/
-    # n_test_subjects/n_overlap_subjects/overlap_test_admissions_frac, but
-    # broken out here for direct inspection without the mechanism-specific
-    # columns cluttering it.
     overlap_cols = ["fold_id", "mechanism", "target_rate", "n_train_subjects", "n_test_subjects",
                      "n_overlap_subjects", "overlap_test_admissions_frac"]
     overlap_df = diag_df[[c for c in overlap_cols if c in diag_df.columns]].drop_duplicates()

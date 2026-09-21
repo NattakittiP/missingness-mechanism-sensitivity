@@ -1,35 +1,4 @@
-"""
-Phase 2.3 — Manipulation Pilot (Protocol v2.1, mandatory before any full
-5-model-family training; see Phase 3+ gate in protocol_v2_1_frozen.md).
-
-Design (frozen in protocol_v2.yaml `pilot:`):
-    - ONE outer fold only (StratifiedGroupKFold(subject_id), fold index 0 of 5)
-    - ONE mask seed only
-    - q in {0.10, 0.30, 0.50}
-    - OR in {1.5, 2, 4}      (MNAR-Y strength; theta = ln(OR))
-    - mask-only baseline:   M_1..M_30 -> Y   (LogisticRegression)
-    - count-only baseline:  C_i = sum_j S_ij -> Y  (LogisticRegression)
-    - NO full 5-model-family training
-
-Conditions evaluated:
-    - Natural baseline (q=0, reference point: does native missingness alone leak Y?)
-    - MCAR                  x q in {0.10, 0.30, 0.50}                    (3 conditions)
-    - MAR-context (theta=ln2, frozen)  x q in {0.10, 0.30, 0.50}          (3 conditions)
-    - MNAR-Y                x q in {0.10, 0.30, 0.50} x OR in {1.5,2,4}  (9 conditions)
-    Total: 1 + 3 + 3 + 9 = 16 conditions x 2 baselines = 32 AUROC evaluations.
-
-Fold safety: for EVERY mechanism (not just MNAR-Y), alpha_j is fit on the
-outer-TRAIN partition only via fit_*(), then the SAME CalibratedGenerator is
-applied via apply_synthetic_mask() separately to train and test. This is
-stricter than Protocol's explicit Test 6 (which only mandates this for
-MNAR-Y) but is the safer, more defensible choice and costs nothing extra.
-
-Fail condition (Protocol v2.1 §2.8 / protocol_v2.yaml pilot.fail_condition):
-    count-only or mask-only AUROC unexpectedly near ceiling (~0.97) at ANY
-    tested (q, OR) combination. This script flags any AUROC >= 0.95 as a
-    WARNING and >= 0.97 as a FAIL, but does not "fix" anything automatically
-    -- per §2.9, the pilot is a design-validation gate, not a tuning loop.
-"""
+"""Phase 2.3 manipulation pilot: mask-only/count-only baseline check across the mechanism grid, mandatory before full model training."""
 
 import json
 import sys
@@ -43,23 +12,21 @@ from sklearn.model_selection import StratifiedGroupKFold
 import missingness_generator_v2 as gen
 
 DATA_PATH = "/mnt/user-data/uploads/DASA2026/Dataset/full_analytic_dataset_mortality_all_admissions.csv"
-MASK_SEED = 20260917  # the single frozen "mask seed" for this pilot
-OUTER_SPLIT_SEED = 42  # for the StratifiedGroupKFold shuffle
+MASK_SEED = 20260917
+OUTER_SPLIT_SEED = 42
 
 WARN_THRESHOLD = 0.95
 FAIL_THRESHOLD = 0.97
 
 
 def make_outer_fold(df: pd.DataFrame):
-    """One StratifiedGroupKFold(subject_id) fold -- the ONLY outer fold used
-    in the pilot, per Protocol v2.1 Phase 2.3."""
+    """Builds the single StratifiedGroupKFold(subject_id) fold used by the pilot."""
     y = df[gen.LABEL_COL].to_numpy()
     groups = df[gen.GROUP_COL].to_numpy()
     skf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=OUTER_SPLIT_SEED)
     train_idx, test_idx = next(skf.split(df, y, groups))
     df_train = df.iloc[train_idx].reset_index(drop=True)
     df_test = df.iloc[test_idx].reset_index(drop=True)
-    # Sanity: no patient (subject_id) appears in both train and test.
     assert set(df_train[gen.GROUP_COL]).isdisjoint(set(df_test[gen.GROUP_COL])), (
         "StratifiedGroupKFold leaked a subject_id across train/test -- outer split is invalid"
     )
@@ -67,8 +34,7 @@ def make_outer_fold(df: pd.DataFrame):
 
 
 def build_masks(df_train, df_test, mechanism: str, q: float, theta: float, rng: np.random.Generator):
-    """Fit alpha on TRAIN only, apply the SAME fitted generator to TRAIN and TEST
-    separately. mechanism in {"natural","mcar","mar","mnar_y"}."""
+    """Fits alpha on train only, applies the same fitted generator to train and test separately."""
     nat_train = gen.compute_natural_mask(df_train)
     nat_test = gen.compute_natural_mask(df_test)
 
@@ -127,18 +93,12 @@ def _fit_eval(mask_train_df, mask_test_df, y_train, y_test, cols):
 
 
 def eval_baselines(masks, y_train, y_test):
-    """Decomposed diagnostic (beyond the Protocol's literal minimum): evaluate
-    mask-only/count-only on (a) final_mask (native+synthetic combined -- this
-    is what the Protocol's pilot spec asks for) AND (b) synthetic_mask alone
-    (isolates the marginal contribution of the injected mechanism from
-    whatever signal is already present in real native missingness)."""
+    """Evaluates mask-only/count-only baselines on both the combined mask and the synthetic mask alone."""
     final_res = _fit_eval(masks["final_train"], masks["final_test"], y_train, y_test, gen.ELIGIBLE_LAB_COLS)
     results = {
         "mask_only_auroc": final_res["mask_auroc"],
         "count_only_auroc": final_res["count_auroc"],
     }
-    # synthetic-only decomposition (skipped for the "natural" condition, where
-    # synthetic_mask is all-zero by construction)
     syn_res = _fit_eval(masks["syn_train"], masks["syn_test"], y_train, y_test, gen.ELIGIBLE_LAB_COLS)
     results["synth_only_mask_auroc"] = syn_res["mask_auroc"]
     results["synth_only_count_auroc"] = syn_res["count_auroc"]
@@ -177,7 +137,7 @@ def main():
     for q in (0.10, 0.30, 0.50):
         conditions.append({"mechanism": "mcar", "q": q, "or": None})
     for q in (0.10, 0.30, 0.50):
-        conditions.append({"mechanism": "mar", "q": q, "or": 2.0})  # theta frozen at OR=2 equivalent
+        conditions.append({"mechanism": "mar", "q": q, "or": 2.0})
     for q in (0.10, 0.30, 0.50):
         for OR in (1.5, 2.0, 4.0):
             conditions.append({"mechanism": "mnar_y", "q": q, "or": OR})
@@ -189,7 +149,7 @@ def main():
     for cond in conditions:
         mechanism, q, OR = cond["mechanism"], cond["q"], cond["or"]
         theta = float(np.log(OR)) if OR is not None else 0.0
-        rng = np.random.default_rng(MASK_SEED)  # same seed reused per condition (Test 7 principle: 1 mask seed for the pilot)
+        rng = np.random.default_rng(MASK_SEED)
 
         masks = build_masks(df_train, df_test, mechanism, q, theta, rng)
         base_results = eval_baselines(masks, y_train, y_test)
@@ -198,11 +158,6 @@ def main():
         row = {"mechanism": mechanism, "q": q, "OR": OR, "theta": round(theta, 6), **base_results, **diag}
         rows.append(row)
 
-        # Check BOTH the combined (final_mask) baselines the Protocol's pilot
-        # spec literally asks for, AND the synthetic-only decomposition -- a
-        # near-ceiling result hiding inside the synthetic-only signal is just
-        # as much a design-validity concern even if it's partly masked by
-        # (or partly explains) the combined number.
         for key in ("mask_only_auroc", "count_only_auroc", "synth_only_mask_auroc", "synth_only_count_auroc"):
             v = row[key]
             if np.isnan(v):
@@ -222,11 +177,6 @@ def main():
 
     result_df.to_csv("phase2_3_pilot_results.csv", index=False)
 
-    # Separate verdict for the MAIN experiment's actual frozen grid
-    # (OR=2 fixed, q in the main rate grid {0.1,0.2,0.3,0.4} + severe {0.5})
-    # vs. the strength-sensitivity grid (q=0.30 fixed, OR in {1.5,2,4}), since
-    # these answer different questions (§2.7: rate sweep and strength sweep
-    # must remain separate).
     all_auroc_cols = ["mask_only_auroc", "count_only_auroc", "synth_only_mask_auroc", "synth_only_count_auroc"]
 
     main_grid = result_df[(result_df["mechanism"] != "mnar_y") | (result_df["OR"] == 2.0)]

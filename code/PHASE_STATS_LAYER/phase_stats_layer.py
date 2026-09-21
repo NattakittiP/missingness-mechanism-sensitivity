@@ -1,52 +1,4 @@
-#!/usr/bin/env python3
-"""
-Fold-level significance-testing / uncertainty-quantification layer for this
-project's headline claims (RQ1-RQ4 + item 11).
-
-WHAT THIS IS
-------------
-A standalone, read-only analysis script. It performs NO new experiments and
-calls NONE of the project's own driver code (run_phase4/5/6/8_*.py) or metric
-functions (metrics_v2.py) -- it reads only the already-produced raw CSV
-outputs and recomputes every quantity from first principles with plain
-pandas/numpy/scipy/statsmodels. This mirrors the same "independent of the
-thing being checked" standard used throughout this project's audits.
-
-It generalizes the one significance check already added ad hoc to the S1
-write-up (a Fisher's exact test on a displacement-rate comparison) to every
-headline displacement-rate and paired-AUROC claim across RQ1, RQ2, RQ3, RQ4,
-and item 11 (MNAR-X, calibration, S1, AP-selection).
-
-WHAT THIS IS NOT
-----------------
-It does not run any new model fits. Section 4 (RQ4 permutation ablation)
-currently only has 5 single-draw folds per (rate, OR) cell to work with; once
-`run_phase6_section_b_repeats.py` (the companion driver, run separately on
-your machine) produces repeated-permutation-draw data, a second pass of this
-script (see the `--perm-repeats-csv` flag) will fold that in for a much
-better-powered characterization of the RQ4 flagship effect.
-
-USAGE
------
-    python3 phase_stats_layer.py --data-root /path/to/DASA2026
-      (expects the same PHASE_4_RQ1_RQ2/, PHASE_5_RQ3/, PHASE_6_RQ4/,
-       PHASE_8_MNAR_X/, PHASE_8_CALIBRATION/, PHASE_8_S1_SENSITIVITY/
-       sibling-folder layout every other driver in this project uses)
-
-    Optional, once available:
-    python3 phase_stats_layer.py --data-root ... \
-        --perm-repeats-csv PHASE_6_RQ4/results/phase6_section_b_repeats/phase6_section_b_repeats_full.csv
-
-OUTPUT
-------
-- Prints every test's result to stdout in a readable form.
-- Writes `phase_stats_layer_results.csv` (one row per test, machine-readable,
-  with raw and Benjamini-Hochberg-adjusted p-values where applicable) to the
-  current directory.
-- Writes `phase_stats_layer_report.md`, a human-readable Markdown report
-  suitable for pasting straight into a paper's supplementary-statistics
-  section or into the methods/results text.
-"""
+"""Standalone, read-only significance-testing layer computing fold-level tests and CIs for every headline claim across RQ1-RQ4."""
 import argparse
 import sys
 from pathlib import Path
@@ -62,10 +14,10 @@ try:
 except ImportError:
     HAVE_STATSMODELS = False
 
-RESULTS: list = []   # list of dicts, one per test -> becomes the CSV
-REPORT_LINES: list = []  # markdown report lines
+RESULTS: list = []
+REPORT_LINES: list = []
 
-RNG_BOOTSTRAP = np.random.default_rng(20260919)  # fixed, documented, reproducible
+RNG_BOOTSTRAP = np.random.default_rng(20260919)
 N_BOOTSTRAP = 10000
 
 
@@ -83,13 +35,9 @@ def record(test_id, family, description, statistic_name, statistic, p_value,
     ))
 
 
-# ---------------------------------------------------------------------------
-# Statistical helpers
-# ---------------------------------------------------------------------------
 
 def wilson_ci(k: int, n: int, alpha: float = 0.05):
-    """Wilson score interval for a binomial proportion. Well-behaved at
-    extreme proportions (0/n, n/n) unlike the normal (Wald) approximation."""
+    """Wilson score interval for a binomial proportion, well-behaved at extreme proportions."""
     if n == 0:
         return (np.nan, np.nan)
     z = norm.ppf(1 - alpha / 2)
@@ -101,8 +49,7 @@ def wilson_ci(k: int, n: int, alpha: float = 0.05):
 
 
 def clopper_pearson_ci(k: int, n: int, alpha: float = 0.05):
-    """Exact (Clopper-Pearson) binomial CI -- the conservative standard many
-    reviewers expect for small-n proportions, especially at 0/n or n/n."""
+    """Exact Clopper-Pearson binomial CI, the conservative standard for small-n proportions."""
     from scipy.stats import beta
     if n == 0:
         return (np.nan, np.nan)
@@ -112,9 +59,7 @@ def clopper_pearson_ci(k: int, n: int, alpha: float = 0.05):
 
 
 def paired_bootstrap_ci(diffs: np.ndarray, n_boot: int = N_BOOTSTRAP, alpha: float = 0.05):
-    """Nonparametric percentile bootstrap CI on the mean of paired
-    differences, resampling folds with replacement. Documented, fixed seed
-    (RNG_BOOTSTRAP) for reproducibility."""
+    """Nonparametric percentile bootstrap CI on the mean of paired differences, resampling folds."""
     diffs = np.asarray(diffs, dtype=float)
     n = len(diffs)
     boot_means = np.empty(n_boot)
@@ -128,11 +73,7 @@ def paired_bootstrap_ci(diffs: np.ndarray, n_boot: int = N_BOOTSTRAP, alpha: flo
 
 def paired_test(diffs: Sequence[float], label: str, family: str, test_id: str,
                  description: str):
-    """Full paired-difference battery for small-n (typically n=5 folds) data:
-    mean, SD, exact sign test, Wilcoxon signed-rank (both with the usual
-    small-n caveats noted), and a nonparametric bootstrap CI on the mean.
-    Does NOT silently hide the small-n power problem -- n is always recorded
-    and reported."""
+    """Full paired-difference battery for small-n data: mean, SD, sign test, Wilcoxon, and bootstrap CI."""
     diffs = np.asarray(diffs, dtype=float)
     n = len(diffs)
     mean_d = float(diffs.mean())
@@ -141,7 +82,6 @@ def paired_test(diffs: Sequence[float], label: str, family: str, test_id: str,
     n_pos = int((diffs > 0).sum())
     n_neg = int((diffs < 0).sum())
     n_zero = n - n_pos - n_neg
-    # exact two-sided sign test on the nonzero differences
     if n_pos + n_neg > 0:
         sign_p = binomtest(min(n_pos, n_neg), n_pos + n_neg, 0.5, alternative="two-sided").pvalue
     else:
@@ -153,7 +93,6 @@ def paired_test(diffs: Sequence[float], label: str, family: str, test_id: str,
         else:
             stat, wilcox_p = (np.nan, np.nan)
     except ValueError:
-        # all-zero or too-small-n degenerate case
         stat, wilcox_p = (np.nan, np.nan)
 
     ci_lo, ci_hi = paired_bootstrap_ci(diffs) if n >= 2 else (np.nan, np.nan)
@@ -182,13 +121,7 @@ def fisher_pairwise(k_a, n_a, k_b, n_b, label_a, label_b, family, test_id, descr
 
 def logistic_trend(x: np.ndarray, y: np.ndarray, label: str, family: str,
                     test_id: str, description: str):
-    """Logistic regression of a binary outcome (e.g. displaced 0/1) on a
-    continuous predictor (rate), used as a formal 'does this rise with rate'
-    test with more power than pairwise comparisons at fixed rates. Handles
-    complete/quasi-separation gracefully (e.g. MNAR-Y's constant-0 outcome
-    across the whole rate sweep) by detecting a degenerate y and reporting
-    that the trend is not estimable rather than crashing or reporting a
-    meaningless huge-SE coefficient."""
+    """Logistic-regression trend test of a binary outcome against a continuous predictor, handling degenerate cases gracefully."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     n = len(y)
@@ -222,7 +155,7 @@ def logistic_trend(x: np.ndarray, y: np.ndarray, label: str, family: str,
 
 
 def benjamini_hochberg(pvals: np.ndarray) -> np.ndarray:
-    """Standard BH FDR correction. Returns adjusted p-values, same order as input."""
+    """Standard Benjamini-Hochberg FDR correction."""
     pvals = np.asarray(pvals, dtype=float)
     n = len(pvals)
     order = np.argsort(pvals)
@@ -235,9 +168,6 @@ def benjamini_hochberg(pvals: np.ndarray) -> np.ndarray:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
 
 def load_all(root: Path):
     d = {}
@@ -252,8 +182,7 @@ def load_all(root: Path):
 
 def rate_sweep_displacement(fold_df: pd.DataFrame, mechanism_prefix: str,
                              baseline_selected_by_fold: dict, rates=(0.10, 0.20, 0.30, 0.40)):
-    """Returns a DataFrame with one row per (rate, fold): rate, fold_id, displaced(0/1),
-    computed as selected_family(rate) != selected_family(q=0 baseline, same fold)."""
+    """Builds a per-(rate, fold) table of whether the selected family displaced relative to the q=0 baseline."""
     rows = []
     for r in rates:
         cid = f"{mechanism_prefix}_q{int(round(r*100)):02d}_main"
@@ -265,9 +194,6 @@ def rate_sweep_displacement(fold_df: pd.DataFrame, mechanism_prefix: str,
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Section 1 -- RQ1 (Phase 4): mechanism vs. rate, displacement
-# ---------------------------------------------------------------------------
 
 def section_rq1(d):
     log("\n" + "=" * 100)
@@ -307,9 +233,6 @@ def section_rq1(d):
                         f"RQ1.trend.{mech}", f"RQ1 {mech} displacement vs rate trend")
 
 
-# ---------------------------------------------------------------------------
-# Section 2 -- RQ2 (Phase 4): OR-sweep AUROC gain, paired by fold
-# ---------------------------------------------------------------------------
 
 def section_rq2(d):
     log("\n" + "=" * 100)
@@ -335,9 +258,6 @@ def section_rq2(d):
                     f"RQ2 paired AUROC change, OR {a} -> {b}, matched by fold")
 
 
-# ---------------------------------------------------------------------------
-# Section 3 -- RQ3 (Phase 5): asymmetric mechanism-shift penalty
-# ---------------------------------------------------------------------------
 
 def section_rq3(d):
     log("\n" + "=" * 100)
@@ -354,7 +274,6 @@ def section_rq3(d):
     mcar_to_mnary = penalty_by_fold("mcar", "mnar_y")
     mnary_to_mcar = penalty_by_fold("mnar_y", "mcar")
     common = sorted(set(mcar_to_mnary) & set(mnary_to_mcar))
-    # both are negative deltas (degradation); compare MAGNITUDES (|.|) paired by fold
     mag_diffs = [abs(mcar_to_mnary[f]) - abs(mnary_to_mcar[f]) for f in common]
     log("\nAsymmetry: |penalty(MCAR source -> MNAR-Y target)| minus |penalty(MNAR-Y source -> MCAR target)|, "
         "paired by fold, at rate=0.30 (positive => MCAR-source penalty is the larger one, as claimed):")
@@ -400,9 +319,6 @@ def section_rq3(d):
            "proportion", k / n, np.nan, wlo, whi, n, note=f"k={k}, n={n}")
 
 
-# ---------------------------------------------------------------------------
-# Section 4 -- RQ4 (Phase 6): permutation ablation, before vs after
-# ---------------------------------------------------------------------------
 
 def section_rq4(d, perm_repeats_df: Optional[pd.DataFrame] = None):
     log("\n" + "=" * 100)
@@ -443,7 +359,6 @@ def section_rq4(d, perm_repeats_df: Optional[pd.DataFrame] = None):
                    f"NOT a null-hypothesis permutation test)",
                    "mean_diff", mean_d, np.nan, ci_lo, ci_hi, len(deltas))
 
-    # OR=4 vs OR=2 collapse magnitude, paired by fold, at each rate (single-draw data)
     log("\nOR=4.0 collapse magnitude vs OR=2.0 collapse magnitude, paired by fold (single-draw data):")
     for rate in sorted(set(r for r, o in cells)):
         d2 = p6[(p6["rate"] == rate) & (p6["or_value"] == 2.0)].sort_values("fold_id")
@@ -451,15 +366,12 @@ def section_rq4(d, perm_repeats_df: Optional[pd.DataFrame] = None):
         m2 = dict(zip(d2["fold_id"], d2["delta_auroc"]))
         m4 = dict(zip(d4["fold_id"], d4["delta_auroc"]))
         common = sorted(set(m2) & set(m4))
-        diffs = [abs(m4[f]) - abs(m2[f]) for f in common]  # positive => OR4 collapse bigger
+        diffs = [abs(m4[f]) - abs(m2[f]) for f in common]
         paired_test(diffs, f"|delta_OR4| - |delta_OR2| at rate={rate}", "RQ4",
                     f"RQ4.or_compare.rate{rate}",
                     f"RQ4 OR=4.0 vs OR=2.0 collapse-magnitude comparison at rate={rate}, paired by fold")
 
 
-# ---------------------------------------------------------------------------
-# Section 5 -- Item 11: MNAR-X, calibration, S1, AP-selection
-# ---------------------------------------------------------------------------
 
 def section_item11(d):
     log("\n" + "=" * 100)
@@ -551,9 +463,6 @@ def section_item11(d):
            "proportion", k / n, np.nan, wlo, whi, n, note=f"k={k}, n={n}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -593,7 +502,6 @@ def main():
     section_rq4(d, perm_repeats_df)
     section_item11(d)
 
-    # ---- BH correction across all tests that produced a real p-value ----
     results_df = pd.DataFrame(RESULTS)
     has_p = results_df["p_value"].notna()
     results_df["p_bh_adjusted"] = np.nan

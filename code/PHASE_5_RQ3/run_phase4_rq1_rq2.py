@@ -1,79 +1,4 @@
-"""
-Phase 4 driver — RQ1 (rate sweep) + RQ2 (mechanism-strength sweep).
-Protocol v2.1 Phase 4: "After selection integrity is correct, run the first
-full experiment ... Do not begin with the full source-target matrix."
-
-WHAT THIS RUNS (14 fresh conditions; full derivation in phase4-driver-summary.md):
-
-  RQ1 (rate sweep, strength held at the frozen main setting theta=ln(2), OR=2):
-    mechanism in {mcar, mar, mnar_y} x rate in {0.10, 0.20, 0.30, 0.40}      -> 12 conditions
-    (rate=0.0 is mechanism-independent by construction -- fit_alphas() gives
-     alpha=-inf for target_rate=0.0 regardless of mechanism/driver -- so it is
-     REUSED from the already-completed Phase 3 Natural/q=0 validation run
-     instead of recomputed 3 more times.)
-
-  RQ2 (strength sweep, mnar_y only per protocol_v2.yaml's frozen
-       mnar_y.sensitivity_or list; rate held at the frozen main setting q=0.30):
-    OR in {1.5, 4.0}                                                         -> 2 conditions
-    (OR=2.0 @ q=0.30 is already produced by RQ1's mnar_y rate sweep above --
-     reused, not rerun.)
-
-  Total fresh compute: 14 conditions x 5 StratifiedGroupKFold(subject_id)
-  outer folds x 5 model families (with full GridSearchCV inner tuning) each.
-  Measured cost of one such condition on this codebase (Phase 3's Natural/q=0
-  validation, same fold/family/tuning cost): 493.4s. Budget accordingly
-  (~1.9-2h at that per-condition rate; will vary with the machine this runs on).
-
-METHODOLOGICAL DECISIONS MADE HERE THAT WERE NOT FULLY PINNED DOWN ELSEWHERE
-(both confirmed with the user before this script was written -- see
-phase4-driver-summary.md for the full paper trail):
-
-  1. Mask-seed repeats per (mechanism, rate) condition = 1 (not the
-     provisionally-proposed, never-frozen "20 seeds" from
-     methodology-redesign-spec.md's pre-Phase-2 open-items list). The 5 outer
-     StratifiedGroupKFold folds serve as the repeated realizations used for
-     entropy / Kendall's tau_b stability summaries -- same convention already
-     used and reported in Phase 3 / Phase 7. These metrics therefore quantify
-     ACROSS-FOLD stability (patient-split variation entangled with
-     missingness-realization variation), not isolated mask-seed variance.
-     Neither RQ1 nor RQ2 as frozen in the source protocol makes a claim that
-     requires separating those two noise sources, so this is not a
-     limitation relative to what RQ1/RQ2 actually ask.
-  2. Mask RNG convention: for every (mechanism, rate, fold) cell, a FRESH
-     `np.random.default_rng(MASK_SEED)` is instantiated (same MASK_SEED used
-     throughout, matching phase2_3_manipulation_pilot.py's documented
-     common-random-numbers convention), then used for the fold's train draw
-     first and its test draw second (one continuing stream, not two
-     independently-seeded ones) -- identical pattern to the pilot, now applied
-     per-fold instead of the pilot's single fold.
-
-FOLD-SAFETY (Protocol v2.1 Phase 2.2 Test 6 / methodology-redesign-spec.md
-Section 9): for every (mechanism, rate, fold) cell, alpha_j is calibrated
-(fit_mcar / fit_mar_context / fit_mnar_y) on THAT FOLD'S OWN outer-train
-partition only, then the SAME fitted generator (same alpha_j, same theta) is
-applied via apply_synthetic_mask() separately to that fold's outer-train and
-outer-test rows. Outer-test rows never influence alpha_j. This is why
-selection_v2.run_condition() (which expects an already-masked, single global
-df) is NOT used directly here -- it does its own internal splitting and has
-no per-fold masking hook. This driver re-implements the same X/y/groups setup
-and outer-split logic as run_condition(), then inserts the per-fold masking
-step before calling selection_v2.run_outer_fold() (Phase 3's fold-safe
-selection routine, reused verbatim and unmodified).
-
-CHECKPOINTING: each condition's result is pickled to results/phase4/<id>.pkl
-immediately after that condition finishes. Re-running this script skips any
-condition whose checkpoint file already exists, so an interrupted ~2h run can
-simply be restarted from where it left off, not from scratch.
-
-Run with:   python3 run_phase4_rq1_rq2.py
-Smoke-test: python3 run_phase4_rq1_rq2.py --smoke-test
-            (1 condition, 2 outer folds instead of 5, exercises the exact
-            same code path -- masking, selection_v2, GridSearchCV, metrics_v2
-            aggregation -- at a scale that finishes in a couple of minutes,
-            to validate the pipeline mechanically before committing to the
-            full run. Writes to results/phase4_smoke/, never touches
-            results/phase4/, so it cannot corrupt or count towards the real run.)
-"""
+"""Phase 4 driver: RQ1 rate sweep and RQ2 mechanism-strength sweep across MCAR/MAR/MNAR-Y."""
 
 from __future__ import annotations
 
@@ -94,48 +19,11 @@ import missingness_generator_v2 as genmod
 import selection_v2 as selv2
 import metrics_v2 as met
 
-# ---------------------------------------------------------------------------
-# Importing selection_v2 dynamically execs the base runner module, which
-# calls warnings.filterwarnings("ignore", category=UserWarning/FutureWarning)
-# GLOBALLY for the rest of this process (confirmed by the Phase 4 pre-flight
-# independent code review). Left alone, a multi-hour unattended run would get
-# zero visibility into sklearn ConvergenceWarning (a UserWarning subclass) or
-# anything else, across its entire duration. Restore default visibility here,
-# right after the import that causes it.
-# ---------------------------------------------------------------------------
 warnings.resetwarnings()
-# "once": print each distinct (message, category) exactly once for the whole
-# process, not once per call site. Verified during the smoke test that plain
-# "default" reprints sklearn's FutureWarning dozens of times per fold (once
-# per internal call site inside GridSearchCV's repeated fits) -- across the
-# full ~14-condition x 5-fold x 5-family run that would bury a genuinely new
-# warning (e.g. ConvergenceWarning) under thousands of already-known,
-# already-benign FutureWarning lines. "once" still guarantees a first-time
-# ConvergenceWarning (or anything else) is shown exactly once, which is the
-# actual goal -- visibility, not silence.
 warnings.simplefilter("once")
-# Verified via the smoke test that plain "once" does NOT fully collapse these
-# two specific sklearn FutureWarnings (they still reprint ~20x across a
-# handful of GridSearchCV fits -- sklearn's internal warnings.warn() calls
-# apparently don't share one __warningregistry__ across repeated fits here).
-# Both are benign, sklearn-version-only API-deprecation notices about lr_l2's
-# hyperparameters (nothing about data, convergence, or result validity), so
-# they are explicitly silenced by message text -- everything else (including
-# a first-time ConvergenceWarning, which WOULD matter) still surfaces via the
-# "once" filter above.
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*'n_jobs' has no effect.*", category=FutureWarning)
 
-# Path resolution (same portability fix applied to selection_v2.py's base-runner
-# path -- the original hardcoded path is specific to the cloud sandbox this
-# driver was developed in and does not exist once this script ships to run
-# elsewhere, e.g. the user's own machine). Resolved at runtime in run_all()
-# via _resolve_data_path(), in order: (1) an explicit --data-path CLI arg,
-# (2) "../Dataset/full_analytic_dataset_mortality_all_admissions.csv" relative
-# to this script -- matches the delivery layout where this driver ships into
-# a sibling folder of the existing Dataset/ folder, (3) the original
-# cloud-sandbox absolute path, for continuity there without needing a
-# relative layout.
 _CONTAINER_DATA_PATH = "/mnt/user-data/uploads/DASA2026/Dataset/full_analytic_dataset_mortality_all_admissions.csv"
 _RELATIVE_DATA_PATH = Path(__file__).resolve().parent.parent / "Dataset" / "full_analytic_dataset_mortality_all_admissions.csv"
 
@@ -154,14 +42,14 @@ def _resolve_data_path(cli_arg: Optional[str]) -> str:
         f"{_RELATIVE_DATA_PATH} (relative to this script) and {_CONTAINER_DATA_PATH!r} "
         "(cloud-sandbox path). Pass --data-path /full/path/to/the/csv explicitly."
     )
-OUTER_SEED = 2026            # SAME seed as Phase 3's Natural/q=0 validation -- required for q=0 reuse + identical fold partitions across all conditions
-MASK_SEED = 20260917         # SAME mask seed as phase2_3_manipulation_pilot.py (documented CRN convention)
+OUTER_SEED = 2026
+MASK_SEED = 20260917
 N_OUTER = 5
 
-THETA_MAIN = 0.693147        # ln(2), OR=2 -- frozen MAR + MNAR-Y main strength (protocol_v2.yaml)
+THETA_MAIN = 0.693147
 RATES_MAIN = [0.10, 0.20, 0.30, 0.40]
 RQ2_RATE = 0.30
-RQ2_EXTRA_ORS = {1.5: float(np.log(1.5)), 4.0: float(np.log(4.0))}  # OR=2.0 @ q=0.30 reused from RQ1
+RQ2_EXTRA_ORS = {1.5: float(np.log(1.5)), 4.0: float(np.log(4.0))}
 
 RESULTS_DIR = Path("results/phase4")
 NATURAL_PICKLE_CANDIDATES = [
@@ -170,9 +58,6 @@ NATURAL_PICKLE_CANDIDATES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Condition grid
-# ---------------------------------------------------------------------------
 
 def build_condition_grid() -> List[Dict[str, Any]]:
     conditions: List[Dict[str, Any]] = []
@@ -192,9 +77,6 @@ def build_condition_grid() -> List[Dict[str, Any]]:
     return conditions
 
 
-# ---------------------------------------------------------------------------
-# Fold-safe masking + one condition's full 5-fold nested-CV run
-# ---------------------------------------------------------------------------
 
 def _prepare_X_y_groups(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, List[str], List[str]]:
     y = df[genmod.LABEL_COL].astype(int).to_numpy()
@@ -240,10 +122,7 @@ def run_condition_with_injection(
     mask_seed: int = MASK_SEED,
     n_outer: int = N_OUTER,
 ) -> Tuple[List[Any], List[Dict[str, Any]]]:
-    """Fold-safe: for each outer fold, calibrate the generator on THAT fold's
-    own outer-train partition only, apply the same fitted generator to both
-    outer-train and outer-test of that fold, then run selection_v2's
-    (inner-CV-only) family selection + outer-test evaluation."""
+    """Fold-safe: calibrates the generator per outer fold, then runs inner-CV-only family selection and outer-test evaluation."""
     X, y, groups, num_cols, cat_cols = _prepare_X_y_groups(df)
     outer_splitter = StratifiedGroupKFold(n_splits=n_outer, shuffle=True, random_state=seed)
 
@@ -267,7 +146,7 @@ def run_condition_with_injection(
             mechanism, rate, theta, df_tr, y_tr, nat_mask_tr, df_te, y_te
         )
 
-        rng = np.random.default_rng(mask_seed)  # fresh per (mechanism, rate, fold) cell -- see module docstring
+        rng = np.random.default_rng(mask_seed)
         syn_mask_tr = genmod.apply_synthetic_mask(nat_mask_tr, driver_tr, gen, rng)
         syn_mask_te = genmod.apply_synthetic_mask(nat_mask_te, driver_te, gen, rng)
 
@@ -309,9 +188,6 @@ def run_condition_with_injection(
     return results, diagnostics
 
 
-# ---------------------------------------------------------------------------
-# q=0 reuse from Phase 3
-# ---------------------------------------------------------------------------
 
 def load_or_compute_natural_q0(df: pd.DataFrame, log, n_outer: int = N_OUTER) -> Tuple[List[Any], List[Dict[str, Any]]]:
     for p in NATURAL_PICKLE_CANDIDATES:
@@ -329,9 +205,6 @@ def load_or_compute_natural_q0(df: pd.DataFrame, log, n_outer: int = N_OUTER) ->
     return run_condition_with_injection(df, mechanism="mcar", rate=0.0, theta=0.0, n_outer=n_outer)
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,7 +216,7 @@ def make_logger(log_path: Path):
         f.write(line + "\n")
         f.flush()
 
-    log.close = f.close  # exposed so run_all() can close the handle explicitly when done
+    log.close = f.close
     return log
 
 
@@ -363,11 +236,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
 
     conditions = build_condition_grid()
     if smoke_test:
-        # Use the mnar_y condition specifically (not mcar) -- it exercises the
-        # most code: outcome-driven alpha fitting, the Y-split diagnostics
-        # branch, and is the mechanism with the highest label-leakage risk if
-        # fold-safety were ever broken, so it's the most informative single
-        # condition to smoke-test.
         conditions = [c for c in conditions if c["condition_id"] == "mnar_y_q10_main"]
     log(f"Condition grid: {len(conditions)} fresh conditions")
     for c in conditions:
@@ -377,7 +245,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     all_diagnostics: List[Dict[str, Any]] = []
     condition_meta: Dict[str, Dict[str, Any]] = {}
 
-    # --- q=0 (Natural), shared across all 3 mechanisms, computed/reused once ---
     q0_ckpt = results_dir / "natural_q0.pkl"
     if q0_ckpt.exists():
         log("q=0 (Natural): checkpoint already exists, loading")
@@ -392,12 +259,10 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     all_results["natural_q00"] = q0_results
     all_diagnostics.extend(q0_diag)
     condition_meta["natural_q00"] = dict(rq="RQ1", mechanism="natural", rate=0.0, theta=0.0, or_value=None)
-    # q=0 is reused verbatim as the rate=0 point for all 3 mechanisms in RQ1 plots/tables.
     for mech in ["mcar", "mar", "mnar_y"]:
         all_results[f"{mech}_q00"] = q0_results
         condition_meta[f"{mech}_q00"] = dict(rq="RQ1", mechanism=mech, rate=0.0, theta=0.0, or_value=(None if mech == "mcar" else 2.0))
 
-    # --- fresh conditions ---
     for i, c in enumerate(conditions, start=1):
         cid = c["condition_id"]
         ckpt = results_dir / f"{cid}.pkl"
@@ -434,12 +299,8 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     log.close()
 
 
-# ---------------------------------------------------------------------------
-# Aggregation: per-fold-per-family table, metrics_v2 layer, manipulation table
-# ---------------------------------------------------------------------------
 
 def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir: Path, log):
-    # 1) Full per-fold-per-family table
     rows = []
     for cid, fold_results in all_results.items():
         meta = condition_meta[cid]
@@ -459,7 +320,6 @@ def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir
     full_table.to_csv(results_dir / "phase4_full_table.csv", index=False)
     log(f"Wrote {results_dir / 'phase4_full_table.csv'} ({len(full_table)} rows)")
 
-    # 2) Fold-summary (one row per condition x fold, selected family only)
     summary_rows = []
     for cid, fold_results in all_results.items():
         meta = condition_meta[cid]
@@ -475,13 +335,10 @@ def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir
     fold_summary.to_csv(results_dir / "phase4_fold_summary.csv", index=False)
     log(f"Wrote {results_dir / 'phase4_fold_summary.csv'}")
 
-    # 3) Manipulation-check / rate-diagnostics table
     diag_df = pd.DataFrame(all_diagnostics)
     diag_df.to_csv(results_dir / "phase4_manipulation_check.csv", index=False)
     log(f"Wrote {results_dir / 'phase4_manipulation_check.csv'}")
 
-    # 4) metrics_v2 layer: entropy + Kendall tau_b per condition; margins per fold;
-    #    displacement rate per mechanism across the rate sweep (incl. RQ2's mnar_y OR sweep separately)
     metrics_summary: Dict[str, Any] = {}
     for cid, fold_results in all_results.items():
         selected = met.selected_family_by_fold(fold_results)
@@ -500,8 +357,6 @@ def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir
             evaluation_margin_mean=float(np.mean(eval_margins)),
         )
 
-    # Baseline-selection displacement rate D_{m,r}: per mechanism, selected family
-    # at rate r vs that SAME fold's selection at r=0, across the RQ1 rate sweep.
     displacement_by_mechanism: Dict[str, Any] = {}
     for mech in ["mcar", "mar", "mnar_y"]:
         by_fold_and_rate: Dict[int, Dict[float, str]] = {}
@@ -522,7 +377,6 @@ def aggregate_and_save(all_results, all_diagnostics, condition_meta, results_dir
         json.dump({"per_condition": metrics_summary, "displacement_by_mechanism": displacement_by_mechanism}, f, indent=2, default=str)
     log(f"Wrote {results_dir / 'phase4_metrics_summary.json'}")
 
-    # 5) Raw results pickle (everything, for later reanalysis)
     with open(results_dir / "phase4_all_results.pkl", "wb") as f:
         pickle.dump({"all_results": all_results, "condition_meta": condition_meta, "all_diagnostics": all_diagnostics}, f)
     log(f"Wrote {results_dir / 'phase4_all_results.pkl'}")

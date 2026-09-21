@@ -1,148 +1,4 @@
-"""
-Phase 6 driver -- RQ4 (shortcut attribution: mask-only / count-only baselines,
-test-only permutation ablation, explicit-indicator-concat ablation).
-
-RQ4 (methodology-redesign-spec.md Sec.0): "In outcome-linked MNAR-Y, how much
-of the apparent AUROC gain is attributable to the missingness PATTERN itself
-vs genuine signal?" -- this is the direct mechanistic follow-up to RQ2's
-shortcut-learning caveat (Phase 4) and to Phase 5's finding that a
-shortcut-reliant model degrades gracefully rather than catastrophically under
-mechanism shift: this phase asks how much of its apparent skill was ever
-"genuine" in the first place.
-
-Primary protocol document, Phase 6 list (verbatim, item order preserved):
-  - mask-only baseline
-  - count-only baseline
-  - test-only permutation ablation
-  - indicator-concat ablation
-  - MNAR-X, calibration sensitivity, AP-based family-selection sensitivity,
-    alternative split sensitivity   <- OUT OF SCOPE here, protocol_v2_1_frozen.md
-    item 11, strictly after RQ4 (item 10). This driver implements ONLY the
-    first four (RQ4 proper).
-
-methodology-redesign-spec.md Sec.10 (verbatim spec for the four techniques):
-  1. Mask-only model: LogisticRegression on M (indicator vector) alone, no
-     feature values. Report AUROC/AP.
-  2. Mask-count-only: single score C_i = sum_j M^syn_ij, AUROC/AP directly.
-  3. Permutation ablation: shuffle M^syn across patients (preserve per-feature
-     marginal rate, destroy Y-association), rerun full model, compare AUROC
-     before/after -- run at MNAR-Y only, at r in {30%, 40%} for the main and
-     one sensitivity OR.
-  4. Explicit-indicator ablation: [X_imputed] vs [X_imputed, M] as model
-     input, at baseline / r=30% / r=40%, MCAR vs MNAR-Y only (not all 4xN
-     cells).
-
-THREE SECTIONS, each independently checkpointed:
-
-SECTION A -- mask-only / count-only / synth-only baselines (methodology
-spec items 1+2, generalized across the whole grid, not just MNAR-Y -- see
-"scope decision" below). Cheap: plain LogisticRegression on <=30 features or
-1 scalar, no GridSearchCV. Grid: q=0 (Natural) + run_phase4_rq1_rq2's exact
-14-condition RQ1+RQ2 grid (mechanism x rate for RQ1, MNAR-Y OR-sweep for
-RQ2), using the SAME masking code, seeds, and per-fold splits as Phase 4 --
-so these baseline numbers sit directly alongside Phase 4's already-reported
-full-model AUROC for the identical conditions, which is exactly what an
-attribution analysis needs (full-model AUROC vs. mask-only/count-only AUROC,
-same condition, same fold).
-
-  SCOPE DECISION (documented, not silently assumed): methodology-redesign-
-  spec.md's RQ4 row scopes this to "mechanism = MNAR-Y" only. This driver
-  runs it across ALL THREE mechanisms (matching what phase2_3_manipulation_
-  pilot.py already did "beyond the Protocol's literal minimum" for its own
-  1-fold pilot -- see that file's own docstring), at negligible extra
-  compute (LogisticRegression baselines, not GridSearchCV) -- the same
-  design choice the pilot already made and that phase4-results-analysis.md
-  relied on ("the pilot's synthetic-mask-only baseline already hit
-  AUROC=0.97 at OR=4").
-
-  IMPORTANT CORRECTION vs. this driver's own first-draft assumption, found
-  during its own smoke test (2026-09-18) -- read before interpreting Section
-  A's MCAR/MAR numbers: MCAR/MAR are NOT a clean "no Y-signal" negative
-  control for the synth-only baselines, even though their injection
-  PROBABILITY model has zero Y-dependence built in. Because synthetic
-  injection can only occur on cells that are natively OBSERVED (eligible_
-  mask = ~natural_mask -- see missingness_generator_v2.compute_eligible_
-  mask/apply_synthetic_mask), and native missingness already correlates
-  with Y (the pre-existing "floor" this project established back in the
-  Phase 2.3 pilot: native mask_only/count_only AUROC approx 0.86/0.84), the
-  REALIZED synthetic mask's row-level statistics (how many cells even had a
-  CHANCE to be injected) inherit a nontrivial residual Y-correlation purely
-  through this eligibility-count channel -- confirmed numerically on real
-  Dataset A (fold 1, q=0.30): corr(eligible_count, synthetic_count)=0.68,
-  and a raw (unfit) synthetic-injection-count score alone already reaches
-  AUROC~0.63 (MCAR) / ~0.64 (MAR) vs. Y, purely from this structural
-  artifact -- MNAR-Y's own raw synthetic-count score reaches ~0.91 by the
-  same measure, i.e. its INTENTIONAL outcome-dependence sits on TOP of this
-  same ~0.63 baseline, not instead of it. The write-up must report this
-  ~0.63 eligibility-confound floor explicitly and read MNAR-Y's synth-only
-  numbers as (confound + genuine outcome-driven signal), not attribute the
-  full gap over 0.5 to intentional MNAR-Y design.
-
-SECTION B -- test-only permutation ablation (spec item 3). MNAR-Y only, rate
-in {0.30, 0.40} (both in the frozen main rate grid), OR in {2.0 (main),
-4.0}. OR=4.0 is this driver's choice of "one sensitivity OR" (not itself
-frozen anywhere) -- justified because OR=4 is the specific condition RQ2's
-own write-up (phase4-results-analysis.md Sec.4) already flagged as the
-"near-ceiling shortcut" case, making it the single most informative
-sensitivity point to test whether permuting the synthetic mask collapses
-that near-ceiling effect. Requires a genuinely fresh full-model fit per
-(rate, OR, fold) cell -- Phase 4's own results for these exact conditions
-have scores but not frozen model objects (same limitation Phase 5 already
-worked around for its own purposes), and the permutation test specifically
-needs the frozen model to evaluate against a second, permuted-mask copy of
-the SAME outer-test fold without retraining -- reuses selection_v2.
-fit_and_select_all_families()/evaluate_frozen_model() exactly as Phase 5
-does.
-
-  "Test-only" (source protocol doc's own wording, Phase 6 list) means: only
-  the synthetic mask of the OUTER-TEST fold is permuted; the model is never
-  retrained, retuned, or recalibrated -- structurally identical discipline
-  to Phase 5's "freeze everything" rule, just swapping a permuted mask in
-  place of a different mechanism's mask.
-
-SECTION C -- explicit-indicator-concat ablation (spec item 4). MCAR vs
-MNAR-Y only, rate in {0.0 (baseline), 0.30, 0.40}. The WITH-indicator side
-(model input = [X_imputed, M], M = one binary "is this lab missing"
-column per eligible lab, appended as ordinary numeric features so they flow
-through the SAME impute/scale pipeline as everything else) is computed
-FRESH here (6 conditions x 5 folds = 30 fold-fits). The WITHOUT-indicator
-side (model input = [X_imputed] only) is NOT recomputed -- it is read
-directly from Phase 4's own real results for the IDENTICAL conditions
-(mcar_q00/q30_main/q40_main, mnar_y_q00/q30_main/q40_main), which this
-project has already established (Phase 5's driver summary Sec.2, and this
-session's Phase-5 recheck) reproduce bit-for-bit under these exact seeds --
-recomputing them here would be pure duplicate compute for a value already
-known exactly. If Phase 4's results file isn't found at the expected path,
-this comparison is skipped with a clear warning (non-fatal) rather than
-failing the whole driver -- the WITH-indicator numbers are still useful on
-their own.
-
-FOLD-SAFETY: identical convention to Phase 4/5 in every section -- for every
-(mechanism, rate[, OR], fold) cell, alpha_j is calibrated on that fold's own
-outer-train partition only, then the SAME fitted generator is applied to
-that fold's outer-train and outer-test. Outer-test rows never influence any
-alpha_j, in any section.
-
-SEED REUSE: OUTER_SEED/MASK_SEED are imported (not redefined) from
-run_phase4_rq1_rq2, exactly as Phase 5 did -- so Section A's and Section
-B/C's diagonal-equivalent cells (e.g. mcar_q30_main's masks) are, by
-construction, the SAME masks Phase 4 and Phase 5 already used.
-
-CHECKPOINTING: one checkpoint file per (section, condition, fold) cell under
-results/phase6/ -- baseline_<condition_id>_fold<F>.pkl, perm_<condition_id>_
-fold<F>.pkl, ind_<condition_id>_fold<F>.pkl. Re-running this script skips
-any cell whose checkpoint already exists.
-
-Run with:   python3 run_phase6_rq4.py
-Smoke-test: python3 run_phase6_rq4.py --smoke-test
-            (2 outer folds instead of 5; Section A reduced to 2 conditions
-            (Natural q=0, mcar_q30_main); Section B reduced to 1 (rate, OR)
-            cell (r=0.30, OR=2.0 main only); Section C reduced to 1
-            (mechanism, rate) cell (MNAR-Y, r=0.30) -- exercises every code
-            path in all three sections at a scale that finishes in a few
-            minutes. Writes to results/phase6_smoke/, never touches
-            results/phase6/.)
-"""
+"""Phase 6 driver: RQ4 shortcut attribution via mask-only/count-only baselines, permutation ablation, and indicator-concat ablation."""
 
 from __future__ import annotations
 
@@ -164,9 +20,6 @@ import missingness_generator_v2 as genmod
 import selection_v2 as selv2
 import metrics_v2 as met
 
-# Reuses Phase 4's driver for: _prepare_X_y_groups, _fit_generator_and_drivers,
-# _resolve_data_path, make_logger, OUTER_SEED, MASK_SEED, THETA_MAIN,
-# build_condition_grid -- see module docstring's "SEED REUSE" note.
 import run_phase4_rq1_rq2 as p4
 
 warnings.resetwarnings()
@@ -174,36 +27,21 @@ warnings.simplefilter("once")
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*'n_jobs' has no effect.*", category=FutureWarning)
 
-OUTER_SEED = p4.OUTER_SEED       # 2026 -- same as Phase 4/5
-MASK_SEED = p4.MASK_SEED         # 20260917 -- same as Phase 4/5
+OUTER_SEED = p4.OUTER_SEED
+MASK_SEED = p4.MASK_SEED
 N_OUTER = 5
 
 RESULTS_DIR = Path("results/phase6")
 
-# Section B
 PERMUTATION_RATES = [0.30, 0.40]
-PERMUTATION_ORS = {2.0: p4.THETA_MAIN, 4.0: float(np.log(4.0))}  # main + one sensitivity OR -- see module docstring
-PERMUTATION_SEED_OFFSET = 555  # documented, distinct from MASK_SEED's own stream -- never reused for anything else
+PERMUTATION_ORS = {2.0: p4.THETA_MAIN, 4.0: float(np.log(4.0))}
+PERMUTATION_SEED_OFFSET = 555
 
-# Section C
 INDICATOR_MECHANISMS = ["mcar", "mnar_y"]
 INDICATOR_RATES = [0.0, 0.30, 0.40]
 
 _PHASE4_CSV_CONTAINER = "/mnt/user-data/uploads/DASA2026/PHASE_4_RQ1_RQ2/results/phase4/phase4_full_table.csv"
 
-# FIX (post-build adversarial review, Finding 2, 2026-09-18): a single
-# hardcoded relative path (script's grandparent / PHASE_4_RQ1_RQ2 / results /
-# phase4 / phase4_full_table.csv) is correct ONLY under the exact documented
-# sibling layout (DASA2026/PHASE_6_RQ4/ next to DASA2026/PHASE_4_RQ1_RQ2/,
-# this script run from within PHASE_6_RQ4/) -- and gives no signal at all if
-# the user's real layout differs even slightly (nested one level deeper/
-# shallower, a renamed folder, or a copy of this script run from elsewhere).
-# It also silently prefers a STALE phase4_full_table.csv over saying nothing,
-# if one happens to exist at a guessed path that isn't actually the fresh
-# run's output. Replaced with a short list of plausible candidate locations,
-# tried in order, each checked for existence before use, and the path that
-# was actually chosen (or the full candidate list, if none matched) is always
-# logged -- so a wrong guess is visible in run.log rather than silent.
 def _phase4_csv_candidates() -> List[Path]:
     script_dir = Path(__file__).resolve().parent
     cwd = Path.cwd()
@@ -244,21 +82,10 @@ def _resolve_phase4_csv_path(cli_arg: Optional[str], log=None) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Section A -- mask-only / count-only / synth-only baselines
-# ---------------------------------------------------------------------------
 
 def _fit_eval_baseline(mask_train_df: pd.DataFrame, mask_test_df: pd.DataFrame,
                         y_train: np.ndarray, y_test: np.ndarray, cols: List[str]) -> Dict[str, float]:
-    """Ported from phase2_3_manipulation_pilot.py's _fit_eval (the pilot's
-    1-fold version of the exact same computation), extended with average
-    precision. LogisticRegression on the binary mask vector -> mask_auroc/ap;
-    LogisticRegression on the scalar per-row missing-count -> count_auroc/ap.
-    NaN out (not an error) on a degenerate cell (constant mask, a single
-    class in y_train, OR a single class in y_test -- matches the pilot's own
-    convention; the y_test guard was added post-build, adversarial review
-    Finding 3: roc_auc_score/average_precision_score both raise on a
-    single-class y_test, which y_train's guard alone does not catch)."""
+    """Fits mask-only and count-only LogisticRegression baselines and scores them, guarding against degenerate folds."""
     mask_train = mask_train_df[cols].to_numpy().astype(float)
     mask_test = mask_test_df[cols].to_numpy().astype(float)
     count_train = mask_train.sum(axis=1, keepdims=True)
@@ -290,10 +117,7 @@ def _fit_eval_baseline(mask_train_df: pd.DataFrame, mask_test_df: pd.DataFrame,
 
 
 def _mask_one_condition_for_fold(df_tr, y_tr, df_te, y_te, mechanism, rate, theta, mask_seed):
-    """Fold-safe masking for ONE (mechanism, rate, theta) condition -- mirrors
-    run_phase4_rq1_rq2.run_condition_with_injection's per-fold body exactly
-    (same helper calls, same RNG convention), factored out here so Section A
-    can call it once per condition per fold without duplicating that logic."""
+    """Fold-safe masking for one (mechanism, rate, theta) condition, mirroring Phase 4's per-fold masking."""
     nat_mask_tr = genmod.compute_natural_mask(df_tr)
     nat_mask_te = genmod.compute_natural_mask(df_te)
     gen, driver_tr, driver_te = p4._fit_generator_and_drivers(
@@ -363,9 +187,6 @@ def run_baseline_grid(df: pd.DataFrame, log, n_outer: int, results_dir: Path, sm
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Section B -- test-only permutation ablation
-# ---------------------------------------------------------------------------
 
 def run_permutation_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: Path, smoke_test: bool) -> pd.DataFrame:
     X, y, groups, num_cols, cat_cols = p4._prepare_X_y_groups(df)
@@ -416,26 +237,6 @@ def run_permutation_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: P
                 for col in genmod.ELIGIBLE_LAB_COLS:
                     X_te_masked_orig.loc[final_mask_te_orig[col].to_numpy(), col] = np.nan
 
-                # Test-only permutation: shuffle syn_mask_te's ROWS across
-                # patients -- a row permutation preserves every column's sum
-                # (per-feature marginal injection rate) exactly, while
-                # destroying row-to-row correlation with y_te (y_te itself is
-                # never permuted). nat_mask_te is left untouched -- only the
-                # MNAR-Y-injected component of the mask is permuted. Distinct,
-                # documented seed offset -- never reuses the masking stream.
-                #
-                # FIX (post-build adversarial review, 2026-09-18): the seed
-                # must vary by fold_id/rate/or_val, not just be a single fixed
-                # MASK_SEED+offset -- otherwise two outer folds with the same
-                # test-set SIZE (this grid has two such pairs: folds 1&2 both
-                # n=2817, folds 4&5 both n=2816) draw byte-identical
-                # np.random.default_rng(...).permutation(n) arrays, and all 4
-                # (rate,OR) cells within one fold reused that same single
-                # permutation pattern too. Mixing in fold_id/rate/or_val via a
-                # SeedSequence-style entropy tuple gives every (fold, rate,
-                # OR) cell its own independent permutation draw. Still never
-                # touches the masking stream (MASK_SEED itself, used above),
-                # and is fully reproducible from these four integers alone.
                 perm_seed_entropy = (
                     MASK_SEED, PERMUTATION_SEED_OFFSET, fold_id,
                     int(round(rate * 100)), int(round(or_val * 10)),
@@ -476,9 +277,6 @@ def run_permutation_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: P
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Section C -- explicit-indicator-concat ablation
-# ---------------------------------------------------------------------------
 
 def run_indicator_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: Path, smoke_test: bool,
                             phase4_csv_arg: Optional[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -533,13 +331,6 @@ def run_indicator_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: Pat
                     X_tr_masked.loc[final_mask_tr[col].to_numpy(), col] = np.nan
                     X_te_masked.loc[final_mask_te[col].to_numpy(), col] = np.nan
 
-                # Explicit-indicator ablation: append one binary "is this lab
-                # missing" column per eligible lab (computed from the ALREADY-
-                # masked X, so it exactly encodes final_mask -- native +
-                # synthetic combined). Model input becomes [X_imputed, M]
-                # instead of just [X_imputed]; these flow through the SAME
-                # impute/scale/sanitize pipeline as every other numeric
-                # feature (they have no missing values themselves).
                 X_tr_with_ind = X_tr_masked.copy()
                 X_te_with_ind = X_te_masked.copy()
                 for col in genmod.ELIGIBLE_LAB_COLS:
@@ -569,8 +360,6 @@ def run_indicator_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: Pat
 
     with_ind_df = pd.DataFrame(rows)
 
-    # WITHOUT-indicator side: reuse Phase 4's real results for the identical
-    # conditions (see module docstring, Section C) rather than recomputing.
     phase4_csv = _resolve_phase4_csv_path(phase4_csv_arg, log=log)
     without_rows: List[Dict[str, Any]] = []
     if phase4_csv is None:
@@ -603,9 +392,6 @@ def run_indicator_ablation(df: pd.DataFrame, log, n_outer: int, results_dir: Pat
     return with_ind_df, without_ind_df
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     return p4.make_logger(log_path)

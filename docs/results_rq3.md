@@ -76,8 +76,6 @@ The direction is consistent across all folds tested for each pair: `MCAR→MNAR-
 
 Monotonic and accelerating — negative in all 15/15 folds tested across the three rates.
 
-Figures for this section (the rate-sensitivity line chart and the source→target shift heatmap) can be regenerated from the tables above with `code/FIGURES/make_figures.py` — see the top-level `README.md`.
-
 ## 7. Caveats
 
 1. Only MCAR was run as a source at r=0.10/r=0.50 (a deliberate compute-bounding design choice) — the rate-trend result in §6 is available only for the MCAR→MNAR-Y direction.

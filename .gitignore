@@ -1,27 +1,21 @@
-# Generated / cache
 __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
 
-# Experiment outputs — never commit real per-patient data or model artifacts
 results/
 *.pkl
 *.pickle
 run.log
 
-# Data — MIMIC-IV derived files are governed by the PhysioNet DUA and must
-# never be committed here (see the "Data access" section of README.md)
 *.csv
 !feature_manifest.csv
 
-# OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Environments
 .venv/
 venv/
 env/

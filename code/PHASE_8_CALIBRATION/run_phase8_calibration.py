@@ -1,82 +1,4 @@
-"""
-Phase 8, Part 2 of 3 — Calibration slope/intercept backfill for MCAR/MAR/
-MNAR-Y (implementation-order item 11).
-
-WHY THIS EXISTS: Phase 4/5/6's saved result pickles were found, during Phase
-8 planning, to contain only aggregate AUROC/AP/Brier per (condition, fold,
-family) -- never the raw per-case predicted probabilities calibration
-slope/intercept actually needs. `protocol_v2.yaml` already freezes
-`calibration_primary: [slope, intercept]` (from Phase 7's metric layer) but
-it has never actually been computed on real data, because the raw
-predictions to compute it from were never persisted anywhere.
-
-WHAT THIS DOES, AND WHY IT IS CHEAP (NOT a re-run of Phase 4): Phase 4 (and,
-transitively, Phase 5's diagonal cells and Phase 6's without-indicator
-cells -- both independently verified bit-for-bit identical to Phase 4 in the
-Phase 6.5 audit) already recorded, for every (condition, fold), exactly
-WHICH family was selected and exactly WHAT hyperparameters GridSearchCV
-picked for it (`phase4_all_results.pkl`'s `FamilyResult.best_params`). This
-driver does not repeat the tuning search across 5 families -- it directly
-refits ONLY the already-known selected family, with its already-known best
-hyperparameters, on the exact same fold-safe masked data Phase 4 used (same
-OUTER_SEED/MASK_SEED, same StratifiedGroupKFold(subject_id) outer split,
-same GroupShuffleSplit(test_size=0.25) train_sub/cal_sub calibration split).
-That means: 1 model fit + 1 calibration fit per (condition, fold), versus
-Phase 4's original 5 families x (3-inner-fold x up-to-9-hyperparam-combo)
-GridSearchCV per (condition, fold) -- dramatically cheaper, while being a
-BUILT-IN correctness check at the same time: the refit outer-test AUROC is
-compared against Phase 4's own recorded value for that exact (condition,
-fold, family) and logged if it drifts beyond floating-point noise (it
-should not, since every input -- data, split, mask, hyperparameters -- is
-byte-identical to what produced Phase 4's original number).
-
-KNOWN, EMPIRICALLY-DIAGNOSED DRIFT CAVEAT (found during this driver's own
-smoke-testing, cross-environment): re-running this exact refit logic in an
-environment other than the one that produced `phase4_all_results.pkl` can
-show a small (~1e-4 to ~2e-3) `auroc_drift` isolated ONLY to folds where
-`selected_family == "xgb"`. This was root-caused, not assumed: for a
-cross-environment reproduction test on real data (`mar_q20_main` fold 1),
-all FOUR non-xgb families (`lr_l2`, `svm_linear_cal`, `rf`, `extratrees`)
-reproduced Phase 4's saved outer-test AUROC bit-for-bit (drift exactly
-0.0), while `xgb` alone drifted by ~5.7e-4 -- proving the fold-safe
-masking/split/data pipeline is reproduced exactly and isolating the
-discrepancy to XGBoost's own histogram-tree-construction internals, which
-are not guaranteed bit-reproducible across xgboost library versions/builds
-(`n_jobs=1` is already set, ruling out within-process thread-order
-nondeterminism; two repeated fresh reruns in the SAME environment were
-bit-identical to each other, ruling out true run-to-run randomness -- the
-difference is specifically environment-to-environment). Because of this,
-`auroc_drift` above 1e-6 is logged as INFO (not treated as a bug) up to a
-much larger practical threshold; only drift beyond that threshold -- which
-would need to appear on non-xgb families too, or be far larger than any
-plausible xgboost-version artifact, to indicate a real masking/pipeline
-bug rather than this benign library-version effect -- is escalated to an
-actionable WARNING. See `DRIFT_INFO_THRESHOLD` / `DRIFT_WARN_THRESHOLD`
-below and the Part-2 driver summary for the full diagnosis.
-
-SCOPE: every condition in Phase 4's real completed grid (18 conditions --
-natural_q00 + the 3-mechanism q00 reuse + 12 RQ1 rate-sweep conditions + 2
-RQ2 OR-sweep conditions -- exactly what `phase4_all_results.pkl` contains).
-This single backfill run therefore ALSO covers calibration for every Phase 5
-diagonal cell and Phase 6 without-indicator cell that reuses one of these
-exact (condition, fold) combinations -- no separate backfill is needed for
-those, since they are already proven to be the identical fitted computation
-(see phase8-driver-summary.md and the Phase 6.5 audit for the bit-for-bit
-verification this relies on).
-
-CALIBRATION METRIC: calibration slope/intercept via the standard logistic
-recalibration definition -- fit `y ~ b0 + b1 * logit(clip(p, eps, 1-eps))`
-by unregularized logistic regression on the outer-test predictions; b1 is
-the calibration slope (1.0 = perfectly calibrated dispersion), b0 is the
-calibration intercept (0.0 = no systematic over/under-prediction). Reported
-per (condition, fold) and aggregated (mean/SD) per condition.
-
-CHECKPOINTING: one checkpoint per condition, results/phase8_calibration/<id>.pkl.
-
-Run with:   python3 run_phase8_calibration.py
-Smoke-test: python3 run_phase8_calibration.py --smoke-test
-            (1 condition, 2 outer folds instead of 5.)
-"""
+"""Phase 8 driver, part 2 of 3: backfills calibration slope/intercept for MCAR/MAR/MNAR-Y by refitting only the already-selected family."""
 
 from __future__ import annotations
 
@@ -123,10 +45,7 @@ def _resolve_data_path(cli_arg: Optional[str]) -> str:
 
 
 def _phase4_results_pkl_candidates() -> List[Path]:
-    """Mirrors run_phase6_rq4.py's multi-candidate Phase-4-artifact search
-    (that driver's own adversarial-review fix), applied to the results
-    pickle instead of the CSV -- this driver needs FamilyResult.best_params,
-    which only the pickle carries (never written to any CSV)."""
+    """Searches multiple candidate paths for the Phase 4 results pickle, mirroring run_phase6_rq4.py's own search."""
     script_dir = Path(__file__).resolve().parent
     cwd = Path.cwd()
     roots = [script_dir.parent, script_dir, cwd.parent, cwd]
@@ -167,34 +86,10 @@ N_OUTER = 5
 THETA_MAIN = 0.693147
 RESULTS_DIR = Path("results/phase8_calibration")
 
-# auroc_drift is ALWAYS recorded in the output CSV regardless of these
-# thresholds; these only control log-line severity (INFO vs WARNING).
-#
-# Family-aware, per an independent adversarial review's own empirical
-# re-derivation (not just this driver's own initial 2-cell smoke test): the
-# reviewer refit ALL 5 families (not just the selected one) against Phase
-# 4's recorded best_params for 5 separate (condition, fold) cells, and then
-# refit xgb alone across the FULL 90-cell grid. Result: non-xgb families
-# (lr_l2, svm_linear_cal, rf, extratrees) were bit-for-bit identical to
-# Phase 4's saved values in EVERY case (drift exactly 0.0, never nonzero even
-# once) -- proving the masking/split/hyperparameter pipeline is reproduced
-# exactly. xgb alone drifted, up to a max of 0.009146 across all 90 cells,
-# symmetric around zero (33 positive / 37 negative / 20 exactly-zero
-# drifts, no directional bias) -- the signature of xgboost's own
-# cross-environment floating-point noise in histogram-based tree
-# construction (n_jobs=1 is already set, and two same-environment reruns
-# were bit-identical, ruling out true run-to-run randomness as the cause),
-# not a pipeline bug. Because non-xgb families have NEVER been observed to
-# drift at all, a single non-xgb drift above DRIFT_INFO_THRESHOLD already
-# deserves attention and is escalated immediately; xgb gets a wider band
-# (DRIFT_WARN_THRESHOLD_XGB, > 3x the empirically observed ceiling) since
-# noise up to ~0.009 is expected there.
 DRIFT_INFO_THRESHOLD = 1e-6
 DRIFT_WARN_THRESHOLD_XGB = 0.03
-DRIFT_WARN_THRESHOLD_OTHER = 1e-6  # any non-xgb drift above INFO is already a WARNING
+DRIFT_WARN_THRESHOLD_OTHER = 1e-6
 
-# Every condition Phase 4 actually produced (mirrors run_phase4_rq1_rq2.py's
-# build_condition_grid() + its q00 reuse-for-all-3-mechanisms convention).
 CONDITIONS_TO_BACKFILL = (
     ["natural_q00", "mcar_q00", "mar_q00", "mnar_y_q00"] +
     [f"{m}_q{r:02d}_main" for m in ["mcar", "mar", "mnar_y"] for r in [10, 20, 30, 40]] +
@@ -202,15 +97,6 @@ CONDITIONS_TO_BACKFILL = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Fold-safe masking, identical logic to run_phase4_rq1_rq2.py's
-# _fit_generator_and_drivers/run_condition_with_injection (duplicated here
-# rather than imported, so this backfill driver has no import-time
-# dependency on that script -- it only needs the already-completed Phase 4
-# OUTPUT, never Phase 4's own driver code, keeping this a standalone,
-# minimal-dependency script per this project's "ships to a sibling folder"
-# delivery convention).
-# ---------------------------------------------------------------------------
 
 def _prepare_X_y_groups(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, List[str], List[str]]:
     y = df[genmod.LABEL_COL].astype(int).to_numpy()
@@ -227,20 +113,7 @@ def _prepare_X_y_groups(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, np.
 
 
 def _parse_condition(cid: str) -> Tuple[str, float, float, Optional[float]]:
-    """condition_id -> (mechanism, rate, theta, or_value). Mirrors the exact
-    literals run_phase4_rq1_rq2.py's build_condition_grid()/q00-reuse produced.
-
-    NOTE: `natural_q00` reports mechanism="natural" (matching
-    phase4_all_results.pkl's own condition_meta["natural_q00"]["mechanism"]
-    exactly -- verified against all 18 conditions' condition_meta entries
-    during adversarial review), NOT "mcar". This only affects the
-    `mechanism` label written to the output CSV -- `_fit_generator_and_drivers`
-    always short-circuits to `fit_natural_baseline()` at rate==0.0 before
-    ever branching on mechanism, so the masking itself is unaffected either
-    way. Getting the label right matters because downstream analysis may
-    group/filter the CSV by `mechanism` rather than `condition_id`, and a
-    mislabeled natural baseline would silently be miscounted as MCAR.
-    """
+    """Parses a condition_id into (mechanism, rate, theta, or_value), matching Phase 4's condition-grid literals."""
     if cid == "natural_q00":
         return "natural", 0.0, 0.0, None
     if cid in ("mcar_q00", "mar_q00", "mnar_y_q00"):
@@ -294,10 +167,6 @@ def _mask_fold(df: pd.DataFrame, mechanism: str, rate: float, theta: float,
     return final_mask_tr, final_mask_te
 
 
-# ---------------------------------------------------------------------------
-# Direct refit of the known-selected family with its known-best hyperparams
-# (no GridSearchCV) -- the cheap step this whole driver exists to do.
-# ---------------------------------------------------------------------------
 
 def _refit_selected_family_and_predict(
     X_train: pd.DataFrame, y_train: np.ndarray, groups_train: np.ndarray,
@@ -326,14 +195,9 @@ def _refit_selected_family_and_predict(
     return selv2.evaluate_frozen_model_with_predictions(final_model, X_test, y_test)
 
 
-# ---------------------------------------------------------------------------
-# Calibration slope/intercept
-# ---------------------------------------------------------------------------
 
 def calibration_slope_intercept(y: np.ndarray, p: np.ndarray, eps: float = 1e-6) -> Tuple[float, float]:
-    """Standard logistic recalibration: fit y ~ b0 + b1*logit(clip(p)) by
-    unregularized logistic regression. b1 = slope (1.0 = ideal dispersion),
-    b0 = intercept (0.0 = no systematic over/under-prediction)."""
+    """Standard logistic recalibration: fits slope and intercept of the outcome against the predicted logit."""
     p_clipped = np.clip(p, eps, 1.0 - eps)
     logit_p = np.log(p_clipped / (1.0 - p_clipped)).reshape(-1, 1)
     lr = LogisticRegression(penalty=None, solver="lbfgs", max_iter=2000)
@@ -343,9 +207,6 @@ def calibration_slope_intercept(y: np.ndarray, p: np.ndarray, eps: float = 1e-6)
     return slope, intercept
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +236,7 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None, phase
     phase4_pkl = _resolve_phase4_results_pkl(phase4_pkl_arg, log)
     with open(phase4_pkl, "rb") as f:
         phase4_data = pickle.load(f)
-    phase4_results = phase4_data["all_results"]  # cid -> List[OuterFoldResult]
+    phase4_results = phase4_data["all_results"]
 
     conditions = CONDITIONS_TO_BACKFILL[:2] if smoke_test else CONDITIONS_TO_BACKFILL
     log(f"Backfilling calibration for {len(conditions)} conditions")

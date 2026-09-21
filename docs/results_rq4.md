@@ -21,9 +21,7 @@ Single-draw results (5 folds/cell):
 | 0.30 | 4.0 (sensitivity) | 0.9653 | 0.8763 | −0.0890 | −0.1102 to −0.0778 | 5/5 |
 | 0.40 | 4.0 (sensitivity) | 0.9576 | 0.8492 | −0.1085 | −0.1415 to −0.0920 | 5/5 |
 
-Shuffling the synthetic mask across patients at test time — same fold, same values, same model, only the row-to-row pattern of *which* labs are missing is destroyed — costs the model about 1 point of AUROC at the main strength (OR=2) but 9–11 points at the sensitivity strength (OR=4), roughly an 8–9× larger collapse. At OR=4, most of the model's apparent skill was never about the lab values at all — it was reading the missingness pattern itself. At the frozen main OR=2 setting, the model is not meaningfully shortcut-reliant.
-
-The before/after permutation-collapse chart for this section can be regenerated from the table above with `code/FIGURES/make_figures.py`.
+Shuffling the synthetic mask across admissions at test time — same fold, same values, same model, only the row-to-row pattern of *which* labs are missing is destroyed — costs the model about 1 point of AUROC at the main strength (OR=2) but 9–11 points at the sensitivity strength (OR=4), roughly an 8–9× larger collapse. At OR=4, a substantial share of the model's AUROC advantage is not about the lab values at all — permuting the mask pushes its score below OR=2's own level (see §5), pointing to the missingness pattern itself as a major driver. At the frozen main OR=2 setting, the model is not meaningfully shortcut-reliant.
 
 ## 3. Section A — mask-only / count-only / synth-only baselines, and the eligibility-confound floor
 
@@ -42,8 +40,6 @@ MNAR-Y OR sweep at q=0.30:
 | OR=1.5 | 0.883 |
 | OR=2.0 (main) | 0.937 |
 | OR=4.0 (sensitivity) | 0.982 |
-
-The eligibility-confound-floor chart for this section can be regenerated from the tables above with `code/FIGURES/make_figures.py`.
 
 ## 4. Section C — explicit-indicator-concat ablation
 

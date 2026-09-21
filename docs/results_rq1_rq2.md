@@ -41,7 +41,7 @@ Calibration is tight everywhere — realized rate is within ±0.001 of target, t
 
 The real, full-scale run reproduces the pre-registered theoretical table closely at every OR.
 
-**MAR X-side dependence**: mask-count-per-patient ↔ admission-context-driver correlation is positive and grows with rate (0.42–0.45 at q=0.1 → 0.60–0.62 at q=0.4), never touching the outcome by construction.
+**MAR X-side dependence**: mask-count-per-admission ↔ admission-context-driver correlation is positive and grows with rate (0.42–0.45 at q=0.1 → 0.60–0.62 at q=0.4), never touching the outcome by construction.
 
 ## 3. RQ1 — Rate sweep (mechanism strength fixed): AUROC declines everywhere, but selection stability diverges sharply by mechanism
 
@@ -91,16 +91,14 @@ Per-fold selected family counts (5 folds each):
 
 At q=0.4, MCAR's modal selected family flips from `xgb` to `extratrees` — consistent with the sharp jump in displacement rate at that condition.
 
-Figures for this section (AUROC vs. rate, selection displacement vs. rate, and the RQ2 strength-sweep summary) can be regenerated from the tables above with `code/FIGURES/make_figures.py` — see the top-level `README.md`.
-
 ## 6. Caveats
 
 1. Selection-stability metrics (entropy, Kendall's τ_b) use the 5 outer folds as the "repeat" dimension (one mask-seed per condition) — they quantify across-fold stability entangled with mask-realization variance, not isolated mask-seed noise.
-2. RQ2's OR=4 condition (and to a lesser extent OR=2) is a shortcut-learning phenomenon (see §4) — not an unqualified performance improvement.
+2. RQ2's OR=4 condition is a shortcut-learning phenomenon (see §4); the RQ4 permutation ablation (`docs/results_rq4.md` §2, §6) confirms this directly at OR=4 but finds only a small, fold-heterogeneous effect at the frozen main OR=2 condition — so the OR=4 AUROC gain is not an unqualified performance improvement, while the OR=2 gain is not comparably shortcut-driven.
 
 ## 7. Case-level bootstrap CIs on headline AUROC/AP
 
-Every AUROC/AP point estimate above has a companion 95% case-level bootstrap CI, computed from raw per-case predictions (pooled across all 5 folds, N=14,081, every patient counted once):
+Every AUROC/AP point estimate above has a companion 95% case-level bootstrap CI, computed from raw per-case predictions (pooled across all 5 folds, N=14,081, every admission counted once):
 
 | Condition | AUROC (95% CI) | AP (95% CI) |
 |---|---|---|

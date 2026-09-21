@@ -1,106 +1,4 @@
-"""
-Phase 5 driver -- RQ3 (source -> target missingness-mechanism deployment shift).
-Protocol v2.1 Phase 5 ("Source -> Target Deployment Shift"):
-
-    train on source, tune on source, select family on source, fit
-    preprocessing on source, fit calibration on source if used, freeze
-    everything, apply the target mechanism only at outer-test evaluation.
-    Do not retrain, retune, or recalibrate after seeing the target
-    environment.
-
-RQ3 (methodology-redesign-spec.md Sec.0): "Does a model SELECTED under
-mechanism A retain performance when the deployment-time missingness
-mechanism shifts to B?" -- train_mechanism vs test_mechanism, at fixed rate.
-
-WHAT THIS RUNS
-
-  Mechanism grid: {mcar, mar, mnar_y} x {mcar, mar, mnar_y} (source x target).
-  MNAR-X is explicitly OUT OF SCOPE here -- protocol_v2_1_frozen.md's Final
-  Implementation Order places MNAR-X at item 11 (Phase 6), strictly AFTER
-  RQ3 (item 9). So this is a 3x3 grid, not the 4x4 mentioned as an
-  originally-considered design in methodology-redesign-spec.md Sec.7.
-
-  Strength: theta = ln(2), OR = 2 for MAR and MNAR-Y -- the SAME "main"
-  strength used throughout RQ1 (protocol_v2.yaml's frozen main setting).
-  RQ3 is a mechanism-shift study, not a strength-sweep study (RQ2 already
-  owns strength); shifting BOTH rate/strength AND mechanism at once would
-  confound what is being attributed to the mechanism shift itself.
-
-  Rate design -- RESOLVED AMBIGUITY, read this before changing it:
-  methodology-redesign-spec.md Sec.7 (verbatim): "4x4 grid ... primary at
-  r=30%, sensitivity at r=10% and r=50% (source-baseline -> all 4 targets
-  only, not full 4x4, to keep compute bounded)." The primary source protocol
-  document (Protocol_v2_1_Experimental_Design_Decisions.md, Phase 5 section)
-  does not itself specify a rate grid at all -- this reduction is therefore
-  this project's own resolution of an underspecified design note, not a
-  literal frozen instruction, and is recorded here for the paper trail:
-    - r=0.30 (primary, matches RQ1/RQ2's main rate): FULL 3x3 source x
-      target matrix -- all 3 mechanisms trained as source, each evaluated
-      against all 3 targets (9 source-target pairs x 5 folds = 45 result
-      cells, from 3 x 5 = 15 fit_and_select_all_families calls).
-    - r=0.10 and r=0.50 (rate sensitivity): reduced grid, ONE source only,
-      evaluated against all 3 targets, per the spec's own "not full
-      NxN, to keep compute bounded" instruction. "source-baseline" is read
-      here as MCAR: in the standard missing-data taxonomy (Rubin), MCAR is
-      the textbook baseline/null mechanism against which MAR and MNAR are
-      defined as deviations -- so MCAR is the literal "baseline" mechanism
-      among the three candidates, not a scientifically-motivated pick tied
-      to any one result. (3 target pairs x 5 folds x 2 rates = 30 more
-      result cells, from 1 x 5 x 2 = 10 more fit_and_select_all_families
-      calls.) This keeps total fresh model-family-tuning compute to 25
-      fold-fits, comparable to or less than Phase 4's 70 fold-fits (14
-      conditions x 5 folds), despite covering a 2-dimensional grid.
-    - rate=0.0 (Natural) is excluded from RQ3 entirely: with no injected
-      missingness there is no mechanism to shift between, so a "source vs
-      target mechanism" comparison is not meaningful at that rate.
-
-  IMPORTANT STRUCTURAL FACT (a direct consequence of the protocol's own
-  "freeze everything, do not retrain after seeing the target" rule):
-  `selected_family` is a property of (rate, source, fold) ONLY -- it is
-  decided via `fit_and_select_all_families()`'s inner-CV step BEFORE any
-  target mechanism is ever touched, so it is IDENTICAL across all 3 targets
-  for a fixed (rate, source, fold). Only the outer-test evaluation (AUROC/
-  AP/Brier, oracle family, regret) varies by target. This is enforced
-  structurally, not just by convention: `evaluate_frozen_model()` never
-  fits anything (see selection_v2.py), so there is no code path through
-  which a target could influence the selected family.
-
-FOLD-SAFETY: identical convention to Phase 4 -- for each (rate, fold), every
-one of the 3 mechanisms' alpha_j is calibrated on THAT fold's own outer-train
-partition only (via missingness_generator_v2's fit_mcar/fit_mar_context/
-fit_mnar_y, reused verbatim), then applied to both outer-train and
-outer-test of that SAME fold. Outer-test rows never influence any alpha_j,
-for any mechanism, source or target.
-
-SEED REUSE -- A BUILT-IN CROSS-CHECK: this driver reuses Phase 4's own
-OUTER_SEED (2026) and MASK_SEED (20260917) verbatim (imported directly from
-run_phase4_rq1_rq2, not redefined), and the SAME per-(mechanism,rate,fold)
-"fresh rng, train draw then test draw" masking convention. Consequence: at
-r=0.10 and r=0.30 (both of which Phase 4 also ran, at OR=2 main strength),
-this driver's DIAGONAL cells (source==target) reproduce Phase 4's own
-mcar_q10_main / mar_q10_main / mnar_y_q10_main / *_q30_main results
-BIT-IDENTICALLY. This was exploited as an independent correctness check
-during the smoke test (see phase5-driver-summary.md) rather than trusted by
-construction alone.
-
-CHECKPOINTING: one checkpoint file per (rate, fold) -- results/phase5/
-r<RR>_fold<F>.pkl -- containing that cell's full-table rows, manipulation-
-check diagnostics, and shift-summary rows for every source trained in that
-(rate, fold) cell. Masks for all 3 mechanisms are computed once per (rate,
-fold) and reused across every source trained at that (rate, fold), since
-masking (bisection alpha calibration) is cheap relative to GridSearchCV
-family tuning -- the actual compute bottleneck. Re-running this script
-skips any (rate, fold) cell whose checkpoint already exists.
-
-Run with:   python3 run_phase5_rq3.py
-Smoke-test: python3 run_phase5_rq3.py --smoke-test
-            (primary rate only, r=0.30, 2 outer folds instead of 5 -- still
-            exercises the FULL 3x3 source x target matrix, all 3
-            fit_and_select_all_families calls per fold, every evaluate_
-            frozen_model() call, and the complete aggregation/output code
-            path. Writes to results/phase5_smoke/, never touches
-            results/phase5/.)
-"""
+"""Phase 5 driver: RQ3 source-to-target missingness-mechanism deployment-shift study."""
 
 from __future__ import annotations
 
@@ -120,15 +18,6 @@ import missingness_generator_v2 as genmod
 import selection_v2 as selv2
 import metrics_v2 as met
 
-# Reuses Phase 4's driver for: _prepare_X_y_groups, _fit_generator_and_drivers,
-# _resolve_data_path, make_logger, OUTER_SEED, MASK_SEED -- see module
-# docstring's "SEED REUSE" note for why reusing (not re-deriving) the seeds
-# specifically matters here. Importing this module also re-applies the
-# warnings-visibility fix (warnings.resetwarnings() + simplefilter("once"))
-# that undoes the base runner's global warning suppression -- see
-# run_phase4_rq1_rq2.py's own docstring for the full explanation. Re-applied
-# explicitly below too, defensively, so this driver's warning behavior does
-# not silently depend on import order or on run_phase4_rq1_rq2.py's internals.
 import run_phase4_rq1_rq2 as p4
 
 warnings.resetwarnings()
@@ -136,15 +25,15 @@ warnings.simplefilter("once")
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*'n_jobs' has no effect.*", category=FutureWarning)
 
-OUTER_SEED = p4.OUTER_SEED       # 2026 -- SAME as Phase 4, required for the diagonal cross-check (see module docstring)
-MASK_SEED = p4.MASK_SEED         # 20260917 -- SAME as Phase 4, ditto
+OUTER_SEED = p4.OUTER_SEED
+MASK_SEED = p4.MASK_SEED
 N_OUTER = 5
 
-MECHANISMS = ["mcar", "mar", "mnar_y"]     # MNAR-X deferred to Phase 6 (protocol_v2_1_frozen.md item 11)
-THETA_MAIN = 0.693147                       # ln(2), OR=2 -- frozen main strength, shared with RQ1
+MECHANISMS = ["mcar", "mar", "mnar_y"]
+THETA_MAIN = 0.693147
 RATES = [0.10, 0.30, 0.50]
 PRIMARY_RATE = 0.30
-SENSITIVITY_SOURCE = "mcar"                 # "source-baseline" per methodology-redesign-spec.md Sec.7 -- see module docstring
+SENSITIVITY_SOURCE = "mcar"
 
 RESULTS_DIR = Path("results/phase5")
 
@@ -155,30 +44,12 @@ def sources_for_rate(rate: float) -> List[str]:
     return [SENSITIVITY_SOURCE]
 
 
-# ---------------------------------------------------------------------------
-# Fold-safe masking: all 3 mechanisms, one outer fold, one rate.
-# ---------------------------------------------------------------------------
 
 def _mask_all_mechanisms_for_fold(
     X_tr: pd.DataFrame, y_tr: np.ndarray, X_te: pd.DataFrame, y_te: np.ndarray,
     df_tr: pd.DataFrame, df_te: pd.DataFrame, rate: float, mask_seed: int,
 ) -> Tuple[Dict[str, Tuple[pd.DataFrame, pd.DataFrame]], Dict[str, Dict[str, Any]]]:
-    """For ONE outer fold and ONE rate, fold-safe-calibrate and apply all 3
-    mechanisms' generators (MCAR; MAR-context and MNAR-Y at theta=THETA_MAIN)
-    to that SAME fold's outer-train/outer-test partitions. Every mechanism's
-    alpha_j is calibrated on this fold's own outer-train only -- identical
-    fold-safety discipline to run_phase4_rq1_rq2.run_condition_with_injection,
-    generalized here to compute all 3 mechanisms' masked copies of the SAME
-    fold at once (RQ3 needs a target mechanism's test mask available
-    regardless of which mechanism(s) are trained as sources at this
-    (rate, fold) cell -- see sources_for_rate()).
-
-    Returns (masked, diagnostics):
-      masked[mechanism] = (X_tr_masked, X_te_masked)
-      diagnostics[mechanism] = manipulation-check dict (r_inject/r_total,
-        plus the MNAR-Y Y-split / MAR H_i-correlation diagnostics Phase 4
-        already reports, computed identically here).
-    """
+    """Fold-safe-calibrates and applies all three mechanisms' generators to one fold's train/test partitions."""
     nat_mask_tr = genmod.compute_natural_mask(df_tr)
     nat_mask_te = genmod.compute_natural_mask(df_te)
 
@@ -190,9 +61,6 @@ def _mask_all_mechanisms_for_fold(
         gen, driver_tr, driver_te = p4._fit_generator_and_drivers(
             mech, rate, theta, df_tr, y_tr, nat_mask_tr, df_te, y_te
         )
-        # Fresh rng per (mechanism, rate, fold) cell -- same CRN convention as
-        # Phase 4 (module docstring there): train draw first, then test draw,
-        # one continuing stream.
         rng = np.random.default_rng(mask_seed)
         syn_mask_tr = genmod.apply_synthetic_mask(nat_mask_tr, driver_tr, gen, rng)
         syn_mask_te = genmod.apply_synthetic_mask(nat_mask_te, driver_te, gen, rng)
@@ -229,9 +97,6 @@ def _mask_all_mechanisms_for_fold(
     return masked, diagnostics
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     return p4.make_logger(log_path)
@@ -243,11 +108,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     log = make_logger(results_dir / "run.log")
 
     n_outer = 2 if smoke_test else N_OUTER
-    # Smoke test uses the primary rate only -- it alone already exercises the
-    # full 3x3 source x target matrix (all 3 sources, all 3 targets), which is
-    # the part of this driver with the most new code relative to Phase 4;
-    # the sensitivity rates reuse that exact same per-source/per-target loop
-    # with a shorter `sources` list, so they add no new code path to validate.
     rates = [PRIMARY_RATE] if smoke_test else RATES
     log(f"=== Phase 5 driver start (smoke_test={smoke_test}, n_outer={n_outer}, rates={rates}) ===")
 
@@ -326,13 +186,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
                             outer_test_auroc=auroc, outer_test_ap=ap, outer_test_brier=brier,
                             selected_family=selected_family,
                         ))
-                    # Diagnostic oracle for THIS target: best of the 5 models
-                    # that were ALL trained on `source`'s data, evaluated on
-                    # `target`. Same candidate-set convention selection_v2.py
-                    # uses for the single-condition (A==B) case, generalized:
-                    # oracle and selected are always compared over the SAME
-                    # frozen-model set, which is what keeps regret >= 0 by
-                    # construction (metrics_v2.selection_regret's docstring).
                     oracle_family = selv2.select_family(family_scores)
                     sel_auroc, sel_ap, sel_brier = family_scores[selected_family]
                     ora_auroc, ora_ap, ora_brier = family_scores[oracle_family]
@@ -343,9 +196,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
                         regret=regret, displaced=(selected_family != oracle_family),
                     )
 
-                # source is always itself a target (MECHANISMS is the target
-                # list for every source), so per_target[source] is always
-                # defined -- this is the "no shift" diagonal reference point.
                 diagonal_auroc = per_target[source]["selected_auroc"]
                 for target in MECHANISMS:
                     pt = per_target[target]
@@ -376,9 +226,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     log.close()
 
 
-# ---------------------------------------------------------------------------
-# Aggregation
-# ---------------------------------------------------------------------------
 
 def aggregate_and_save(all_full_rows, all_diag_rows, all_shift_rows, results_dir: Path, log):
     full_table = pd.DataFrame(all_full_rows)
@@ -393,9 +240,6 @@ def aggregate_and_save(all_full_rows, all_diag_rows, all_shift_rows, results_dir
     shift_df.to_csv(results_dir / "phase5_shift_summary.csv", index=False)
     log(f"Wrote {results_dir / 'phase5_shift_summary.csv'} ({len(shift_df)} rows) -- this is the primary RQ3 result table")
 
-    # Per (rate, source, target): mean/SD selected AUROC, mean regret, mean
-    # shift_delta_auroc (vs that source's own diagonal, same fold), fraction
-    # of folds displaced (selected != oracle for that target).
     metrics_summary: Dict[str, Any] = {}
     for (rate, source, target), g in shift_df.groupby(["rate", "source_mechanism", "target_mechanism"]):
         key = f"r{rate}__{source}__to__{target}"

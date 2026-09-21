@@ -1,86 +1,4 @@
-"""
-Phase 8 driver, part 1 of 3 — MNAR-X full experiment (RQ1-equivalent rate
-sweep + RQ2-equivalent strength sweep), the primary piece of implementation-
-order item 11 ("MNAR-X + calibration + remaining sensitivities").
-
-Mirrors run_phase4_rq1_rq2.py's structure and conventions exactly (same
-OUTER_SEED/MASK_SEED, same StratifiedGroupKFold(subject_id) outer split, same
-checkpoint-per-condition design, same aggregation/output shape), applied to
-the one mechanism MCAR/MAR/MNAR-Y's original Phase 4 run deliberately left
-out (Protocol v2.1 Phase 2: "Do not implement MNAR-X first").
-
-WHAT THIS RUNS (6 fresh conditions; full derivation of gamma/z_clip in
-phase8-driver-summary.md):
-
-  RQ1-equivalent (rate sweep, strength held at the resolved main gamma):
-    mnar_x x rate in {0.10, 0.20, 0.30, 0.40}                -> 4 conditions
-    (rate=0.0 is mechanism-independent by construction -- fit_mnar_x gives
-     alpha_j=-inf for target_rate=0.0 regardless of gamma -- so it is REUSED
-     from the same natural_q00 checkpoint Phase 4 already produced, exactly
-     like Phase 4 reused Phase 3's Natural/q=0 run.)
-
-  RQ2-equivalent (strength sweep, rate held at the frozen main rate q=0.30):
-    gamma in {ln(1.5)/2, ln(4)/2}   (OR=1.5, OR=4.0 at the |z|=2 reference
-    point -- same OR grid MNAR-Y's own RQ2 sweep uses)              -> 2 conditions
-    (gamma=ln(2)/2 (OR=2.0) @ q=0.30 is already produced by the RQ1-
-     equivalent sweep above -- reused, not rerun.)
-
-  Total fresh compute: 6 conditions x 5 StratifiedGroupKFold(subject_id)
-  outer folds x 5 model families (full GridSearchCV inner tuning) each -- 30
-  fold-fits, versus Phase 4's 70 (14 conditions x 5 folds), since this covers
-  one mechanism instead of three. Expect roughly 30/70 x Phase 4's measured
-  wall time (~1.9-2h) -> **very roughly 45-55 minutes**, will vary with the
-  machine this runs on (measure the first condition and extrapolate).
-
-WHY GAMMA/Z_CLIP ARE WHAT THEY ARE (full derivation, verified against the
-real 30-column dataset, in phase8-driver-summary.md Sec.1 -- summarized here
-for anyone reading only this file):
-  - gamma_main = ln(2)/2 ~ 0.34657, chosen so that P(mask) at a perfectly
-    typical value (|z|=0) versus a value 2 SD from its column's own mean
-    (|z|=2) has OR=2.0 exactly -- the same reference-point OR the MAR and
-    MNAR-Y main conditions use for their own binary drivers, so all three
-    mechanisms' "main" strength is comparable at that fixed reference point.
-  - RQ2-equivalent sensitivity gammas follow the identical gamma=ln(OR)/2
-    rule at OR in {1.5, 4.0} -- exactly mirroring MNAR-Y's own OR grid.
-  - Z_CLIP=5.0: 4 of the 30 real lab columns are skewed enough (native max
-    |z| in the 40-50 range) that an UNCLIPPED |z| would drive that column's
-    single most extreme native value's masking probability to a numerically-
-    zero floor at gamma_main -- i.e. that cell could never be selected for
-    synthetic masking in ANY repeat, a subtle, undocumented bias in the
-    eligible pool. Clipping the driver (never the underlying data) at
-    |z|<=5 keeps every column's worst-case masking probability at a
-    non-degenerate 7-13% floor instead. See missingness_generator_v2.py's
-    MNAR-X section docstring for the full numeric verification.
-
-FOLD-SAFETY: identical contract to every other mechanism in this project --
-for every (rate, fold) cell, mu_j/sigma_j/alpha_j are all calibrated
-(fit_mnar_x) on THAT FOLD'S OWN outer-train partition only, then the SAME
-fitted generator is applied (apply_mnar_x_mask) separately to that fold's
-outer-train and outer-test rows. Outer-test rows never influence mu_j,
-sigma_j, or alpha_j.
-
-CALIBRATION DATA CAPTURE (feeds Phase 8 part 2, calibration-sensitivity):
-unlike Phase 4/5/6, this driver captures the SELECTED family's raw
-(y_test, p_test) pair for every (condition, fold) cell, via
-selection_v2.run_outer_fold_with_predictions (additive, zero extra model
-fits versus run_outer_fold -- see selection_v2.py's docstring on that
-function). Saved to results/phase8_mnar_x/phase8_mnar_x_predictions.pkl.
-This was found to be necessary during Phase 8 planning: Phase 4/5/6's saved
-result pickles only ever contained aggregate AUROC/AP/Brier, never raw
-per-case predicted probabilities, so calibration slope/intercept could not
-actually be computed "for free" from them as originally assumed -- see
-phase8-driver-summary.md Sec.2 for the full correction.
-
-CHECKPOINTING: each condition's result is pickled to
-results/phase8_mnar_x/<id>.pkl immediately after that condition finishes.
-Re-running this script skips any condition whose checkpoint already exists.
-
-Run with:   python3 run_phase8_mnar_x.py
-Smoke-test: python3 run_phase8_mnar_x.py --smoke-test
-            (1 condition, 2 outer folds instead of 5, exercises the exact
-            same code path. Writes to results/phase8_mnar_x_smoke/, never
-            touches results/phase8_mnar_x/.)
-"""
+"""Phase 8 driver, part 1 of 3: the MNAR-X rate and strength sweep, mirroring Phase 4's structure and conventions."""
 
 from __future__ import annotations
 
@@ -100,10 +18,6 @@ import missingness_generator_v2 as genmod
 import selection_v2 as selv2
 import metrics_v2 as met
 
-# Same warnings-visibility fix as run_phase4_rq1_rq2.py (see that file's
-# comment for the full rationale) -- importing selection_v2 silences
-# UserWarning/FutureWarning globally as a side effect of the vendored base
-# runner it execs; restore visibility for this multi-condition unattended run.
 warnings.resetwarnings()
 warnings.simplefilter("once")
 warnings.filterwarnings("ignore", message=r".*'penalty' was deprecated.*", category=FutureWarning)
@@ -129,11 +43,6 @@ def _resolve_data_path(cli_arg: Optional[str]) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase-4-checkpoint candidate search (for q=0 reuse), mirroring run_phase6_
-# rq4.py's multi-candidate Phase-4-CSV resolution pattern (the fix from that
-# driver's own adversarial review) rather than a single hardcoded guess.
-# ---------------------------------------------------------------------------
 
 def _natural_q0_candidates() -> List[Path]:
     script_dir = Path(__file__).resolve().parent
@@ -153,22 +62,19 @@ def _natural_q0_candidates() -> List[Path]:
     return seen
 
 
-OUTER_SEED = 2026            # SAME seed as Phase 3/4/5/6 -- required for q=0 reuse + identical fold partitions
-MASK_SEED = 20260917         # SAME mask seed used throughout this project (documented CRN convention)
+OUTER_SEED = 2026
+MASK_SEED = 20260917
 N_OUTER = 5
 
 Z_CLIP = 5.0
-GAMMA_MAIN = float(np.log(2.0) / 2.0)          # OR=2.0 @ |z|=2 -- main strength, comparable to MAR/MNAR-Y's OR=2
-GAMMA_SENS = {1.5: float(np.log(1.5) / 2.0), 4.0: float(np.log(4.0) / 2.0)}  # RQ2-equivalent, same OR grid as MNAR-Y
+GAMMA_MAIN = float(np.log(2.0) / 2.0)
+GAMMA_SENS = {1.5: float(np.log(1.5) / 2.0), 4.0: float(np.log(4.0) / 2.0)}
 RATES_MAIN = [0.10, 0.20, 0.30, 0.40]
 RQ2_RATE = 0.30
 
 RESULTS_DIR = Path("results/phase8_mnar_x")
 
 
-# ---------------------------------------------------------------------------
-# Condition grid
-# ---------------------------------------------------------------------------
 
 def build_condition_grid() -> List[Dict[str, Any]]:
     conditions: List[Dict[str, Any]] = []
@@ -185,9 +91,6 @@ def build_condition_grid() -> List[Dict[str, Any]]:
     return conditions
 
 
-# ---------------------------------------------------------------------------
-# Fold-safe masking + one condition's full 5-fold nested-CV run
-# ---------------------------------------------------------------------------
 
 def _prepare_X_y_groups(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, List[str], List[str]]:
     y = df[genmod.LABEL_COL].astype(int).to_numpy()
@@ -211,11 +114,7 @@ def run_condition_with_injection(
     mask_seed: int = MASK_SEED,
     n_outer: int = N_OUTER,
 ) -> Tuple[List[Any], List[Dict[str, Any]], Dict[int, Tuple[np.ndarray, np.ndarray]]]:
-    """Fold-safe: for each outer fold, calibrate mu_j/sigma_j/alpha_j on THAT
-    fold's own outer-train partition only (fit_mnar_x), apply the same frozen
-    generator to both outer-train and outer-test of that fold (apply_mnar_x_
-    mask), then run selection_v2's fold-safe family selection + evaluation,
-    capturing the selected family's raw predictions for calibration."""
+    """Fold-safe: calibrates the MNAR-X generator per outer fold, then runs family selection/evaluation and captures predictions."""
     X, y, groups, num_cols, cat_cols = _prepare_X_y_groups(df)
     outer_splitter = StratifiedGroupKFold(n_splits=n_outer, shuffle=True, random_state=seed)
 
@@ -247,7 +146,7 @@ def run_condition_with_injection(
         else:
             gen = genmod.fit_mnar_x(df_tr, nat_mask_tr, gamma=gamma, target_rate=rate, z_clip=Z_CLIP)
 
-        rng = np.random.default_rng(mask_seed)  # fresh per (rate, gamma, fold) cell -- matches this project's CRN convention
+        rng = np.random.default_rng(mask_seed)
         syn_mask_tr = genmod.apply_mnar_x_mask(df_tr, nat_mask_tr, gen, rng)
         syn_mask_te = genmod.apply_mnar_x_mask(df_te, nat_mask_te, gen, rng)
 
@@ -269,11 +168,6 @@ def run_condition_with_injection(
             "r_inject_test": rates_te["r_inject"], "r_total_test": rates_te["r_total"],
         }
         if rate > 0.0:
-            # Manipulation-check diagnostic specific to MNAR-X (protocol_v2.yaml/
-            # methodology-redesign-spec.md Sec.8's "corr(mask, |z|) -- MNAR-X only"
-            # row): pooled correlation between a cell's own |z| and whether it was
-            # synthetically masked, across all eligible cells on the test partition.
-            # Expected sign: NEGATIVE (higher |z| -> less likely masked, by design).
             elig_te = genmod.compute_eligible_mask(nat_mask_te)
             z_list, m_list = [], []
             for col in genmod.ELIGIBLE_LAB_COLS:
@@ -301,9 +195,6 @@ def run_condition_with_injection(
     return results, diagnostics, predictions
 
 
-# ---------------------------------------------------------------------------
-# q=0 reuse from Phase 4's natural_q0.pkl (mechanism-independent at rate=0)
-# ---------------------------------------------------------------------------
 
 def load_or_compute_natural_q0(df: pd.DataFrame, log, n_outer: int = N_OUTER) -> Tuple[List[Any], List[Dict[str, Any]], Dict[int, Tuple[np.ndarray, np.ndarray]]]:
     for p in _natural_q0_candidates():
@@ -311,9 +202,6 @@ def load_or_compute_natural_q0(df: pd.DataFrame, log, n_outer: int = N_OUTER) ->
             log(f"q=0: reusing existing Phase 3/4 natural_q0 checkpoint from {p}")
             with open(p, "rb") as f:
                 loaded = pickle.load(f)
-            # Phase 4's natural_q0.pkl is (results, diagnostics) -- no predictions
-            # captured there (predates this driver's calibration-capture addition).
-            # Phase 3's raw pickle is a bare list of OuterFoldResult.
             if isinstance(loaded, tuple) and len(loaded) == 2:
                 results, diag = loaded
             else:
@@ -330,9 +218,6 @@ def load_or_compute_natural_q0(df: pd.DataFrame, log, n_outer: int = N_OUTER) ->
     return run_condition_with_injection(df, rate=0.0, gamma=GAMMA_MAIN, n_outer=n_outer)
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 def make_logger(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +260,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     all_predictions: Dict[str, Dict[int, Tuple[np.ndarray, np.ndarray]]] = {}
     condition_meta: Dict[str, Dict[str, Any]] = {}
 
-    # --- q=0, reused from Phase 4's natural_q0.pkl ---
     q0_ckpt = results_dir / "natural_q0.pkl"
     if q0_ckpt.exists():
         log("q=0: checkpoint already exists, loading")
@@ -392,7 +276,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     all_predictions["mnar_x_q00"] = q0_pred
     condition_meta["mnar_x_q00"] = dict(rq="RQ1", mechanism="mnar_x", rate=0.0, gamma=0.0, or_value=None)
 
-    # --- fresh conditions ---
     for i, c in enumerate(conditions, start=1):
         cid = c["condition_id"]
         ckpt = results_dir / f"{cid}.pkl"
@@ -429,9 +312,6 @@ def run_all(smoke_test: bool = False, data_path_arg: Optional[str] = None):
     log.close()
 
 
-# ---------------------------------------------------------------------------
-# Aggregation
-# ---------------------------------------------------------------------------
 
 def aggregate_and_save(all_results, all_diagnostics, all_predictions, condition_meta, results_dir: Path, log):
     rows = []
@@ -490,7 +370,6 @@ def aggregate_and_save(all_results, all_diagnostics, all_predictions, condition_
             evaluation_margin_mean=float(np.mean(eval_margins)),
         )
 
-    # Baseline-selection displacement rate for mnar_x across its own rate sweep
     by_fold_and_rate: Dict[int, Dict[float, str]] = {}
     for r in [0.0] + RATES_MAIN:
         cid = "mnar_x_q00" if r == 0.0 else f"mnar_x_q{int(round(r * 100)):02d}_main"
@@ -513,9 +392,6 @@ def aggregate_and_save(all_results, all_diagnostics, all_predictions, condition_
         pickle.dump({"all_results": all_results, "condition_meta": condition_meta, "all_diagnostics": all_diagnostics}, f)
     log(f"Wrote {results_dir / 'phase8_mnar_x_all_results.pkl'}")
 
-    # Predictions, saved separately (kept out of the main results pickle since
-    # it holds raw per-case arrays, not just aggregate metrics) -- feeds Phase
-    # 8 part 2 (calibration slope/intercept).
     with open(results_dir / "phase8_mnar_x_predictions.pkl", "wb") as f:
         pickle.dump({"predictions": all_predictions, "condition_meta": condition_meta}, f)
     log(f"Wrote {results_dir / 'phase8_mnar_x_predictions.pkl'} "

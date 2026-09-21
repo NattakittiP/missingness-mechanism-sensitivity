@@ -1,40 +1,4 @@
-"""
-Missingness Generator v2 — Protocol v2.1 (frozen), Phase 2.
-
-Implements ONLY the four mechanisms Protocol v2.1 Phase 2 requires first:
-    1. Natural baseline   (no synthetic injection)
-    2. MCAR                (theta = 0, driver-free)
-    3. MAR-context          (driver = H_i, from admission_type; NEVER sees y)
-    4. MNAR-Y               (driver = Y_i, the outcome)
-
-MNAR-X is explicitly deferred (Protocol v2.1 Phase 2: "Do not implement
-MNAR-X first").
-
-Design invariants enforced throughout (Protocol v2.1 Phase 2.1):
-    synthetic_mask & natural_mask == False   (never "re-mask" an already-missing cell)
-    synthetic_mask outside lab columns == 0  (only the 30 eligible lab_* columns
-                                               may ever be synthetically masked)
-
-Rate semantics (frozen in protocol_v2.yaml):
-    r_inject : newly-masked cells / originally-observed eligible cells (target, calibrated)
-    r_total  : all missing cells (native + injected) / all eligible cells (realized)
-
-Calibration: for each eligible lab column j independently, alpha_j is found by
-bisection so that
-    mean_i [ sigmoid(alpha_j + theta * driver_i) ]  ==  q     (over eligible rows i for column j)
-Then each eligible cell (i, j) is synthetically masked with probability
-    P(S_ij = 1) = sigmoid(alpha_j + theta * driver_i)
-via an independent Bernoulli draw. This gives realized r_inject ~= q by
-construction (Test 1, Test 2), while allowing the mechanism to be
-outcome/driver-dependent within that fixed marginal budget.
-
-Fold safety (Protocol v2.1 Phase 2.2, Test 6): alpha_j (and, for consistency,
-the MAR driver mapping) must be fit on the outer-TRAIN partition only, then
-applied unchanged (same alpha_j, same theta) to generate masks on outer-TEST
-rows. This module never recalibrates on test data — callers achieve this by
-calling `fit_alphas(...)` on the train subset and passing the fitted alphas
-into `apply_synthetic_mask(...)` for both train and test subsets.
-"""
+"""Missingness generator implementing the natural-baseline, MCAR, MAR-context, and MNAR-Y mechanisms per Protocol v2.1 Phase 2."""
 
 from __future__ import annotations
 
@@ -44,9 +8,6 @@ from typing import Dict, Iterable, Optional
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Frozen feature roles (Protocol v2.1 §1.10, phase0_feature_audit.md, protocol_v2.yaml)
-# ---------------------------------------------------------------------------
 
 ELIGIBLE_LAB_COLS = [
     "lab_50802", "lab_50820", "lab_50821", "lab_50861", "lab_50863",
@@ -69,9 +30,6 @@ EXCLUDED_FROM_MODEL_ENTIRELY = ["hadm_id", "subject_id", "discharge_location"]
 LABEL_COL = "label_mortality"
 GROUP_COL = "subject_id"
 
-# ---------------------------------------------------------------------------
-# Frozen MAR driver H_i (Protocol v2.1 Phase 0 audit, X-side only, y never used)
-# ---------------------------------------------------------------------------
 
 H_I_HIGH_INTENSITY_ADMISSION_TYPES = frozenset({
     "OBSERVATION ADMIT", "ELECTIVE", "EW EMER.", "DIRECT EMER.",
@@ -83,17 +41,7 @@ H_I_LOW_INTENSITY_ADMISSION_TYPES = frozenset({
 
 
 def compute_H_i(admission_type: pd.Series) -> pd.Series:
-    """Binary admission-context driver, X-side only. Never touches the outcome.
-
-    Raises if an admission_type value is seen that isn't in either predeclared
-    group, rather than silently defaulting it — Protocol v2.1 §1.7 requires the
-    mapping be based on inspected categories, not assumed ones. This includes
-    NaN/missing admission_type: Phase 0 confirmed admission_type is 0.0%
-    natively missing in Dataset A today, but a silent NaN->H_i=0 default would
-    be exactly the kind of unaudited assumption §1.7 forbids if that ever
-    changes (e.g. a future data pull, or MNAR-X reusing this driver) -- so a
-    NaN is treated as an unrecognized category and raises, not silently mapped.
-    """
+    """Computes the binary admission-context driver from admission_type, raising on any unrecognized category rather than defaulting."""
     observed = admission_type.unique()
     unknown = set(observed) - H_I_HIGH_INTENSITY_ADMISSION_TYPES - H_I_LOW_INTENSITY_ADMISSION_TYPES
     unknown = {u for u in unknown if not (isinstance(u, float) and np.isnan(u))} | (
@@ -108,19 +56,15 @@ def compute_H_i(admission_type: pd.Series) -> pd.Series:
     return admission_type.isin(H_I_HIGH_INTENSITY_ADMISSION_TYPES).astype(int)
 
 
-# ---------------------------------------------------------------------------
-# Mask-state primitives (Protocol v2.1 Phase 2.1)
-# ---------------------------------------------------------------------------
 
 def compute_natural_mask(df: pd.DataFrame, lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS) -> pd.DataFrame:
-    """natural_mask[i, j] = True iff cell (i, j) was NOT observed in the raw data."""
+    """Returns the boolean mask of natively-unobserved cells."""
     lab_cols = list(lab_cols)
     return df[lab_cols].isna()
 
 
 def compute_eligible_mask(natural_mask: pd.DataFrame) -> pd.DataFrame:
-    """eligible_mask[i, j] = True iff cell (i, j) was natively observed
-    (only originally-observed cells are eligible for synthetic masking)."""
+    """Returns the boolean mask of cells eligible for synthetic masking (natively observed cells only)."""
     return ~natural_mask
 
 
@@ -128,9 +72,6 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
-# ---------------------------------------------------------------------------
-# Alpha calibration (per-feature bisection)
-# ---------------------------------------------------------------------------
 
 def _bisect_alpha_for_rate(
     driver: np.ndarray,
@@ -141,23 +82,10 @@ def _bisect_alpha_for_rate(
     tol: float = 1e-8,
     max_iter: int = 200,
 ) -> float:
-    """Find alpha such that mean(sigmoid(alpha + theta*driver)) == target_rate.
-
-    mean(sigmoid(...)) is strictly increasing in alpha (sigmoid is monotonic),
-    so a scalar bisection is well-posed and always converges for target_rate
-    in (0, 1). Callers handle target_rate == 0 as a special case upstream
-    (alpha := -inf, i.e. no injection) rather than calling this function.
-    """
+    """Finds alpha by bisection such that the mean injection probability equals the target rate."""
     if not (0.0 < target_rate < 1.0):
         raise ValueError(f"_bisect_alpha_for_rate requires target_rate in (0, 1), got {target_rate}")
     if not np.all(np.isfinite(driver)):
-        # Found during the independent Phase 4 pre-flight review: without this
-        # guard, a NaN anywhere in `driver` makes f(alpha) NaN for every alpha,
-        # and since `NaN < 0` is False in Python, the bisection loop below
-        # silently always takes the "raise lo" branch and converges to
-        # alpha=hi=50.0 (~100% injection probability) instead of erroring --
-        # exactly the kind of silent-default-on-bad-input this module's own
-        # compute_H_i explicitly refuses to do elsewhere. Fail loud instead.
         raise ValueError(
             "_bisect_alpha_for_rate: driver contains non-finite values (NaN/inf); "
             "refusing to silently calibrate against them. Audit the driver source "
@@ -168,9 +96,6 @@ def _bisect_alpha_for_rate(
         return float(np.mean(_sigmoid(alpha + theta * driver))) - target_rate
 
     flo, fhi = f(lo), f(hi)
-    # Widen the bracket if the target rate is extreme enough that +-50 logits
-    # (already ~1e-22 / 1-1e-22 in probability) don't bracket it -- should not
-    # happen for any q in [0, 1) but guarded defensively.
     while flo > 0 and lo > -1e6:
         lo *= 2
         flo = f(lo)
@@ -192,16 +117,10 @@ def _bisect_alpha_for_rate(
 
 @dataclasses.dataclass
 class CalibratedGenerator:
-    """Frozen, fold-safe generator state: one alpha_j per eligible column,
-    fit on a single (outer-train) partition, plus the shared theta.
-
-    `driver_kind` records what was used to fit alpha_j, purely for
-    bookkeeping / assertions (e.g. Test 5 below checks this is never "y"
-    for a MAR-context generator instantiated the correct way).
-    """
+    """Frozen, fold-safe generator state: one alpha per eligible column, fit on a single partition."""
     theta: float
     target_rate: float
-    driver_kind: str  # "none" (MCAR), "H_i" (MAR-context), "Y" (MNAR-Y)
+    driver_kind: str
     alpha: Dict[str, float]
 
 
@@ -213,15 +132,7 @@ def fit_alphas(
     driver_kind: str,
     lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS,
 ) -> CalibratedGenerator:
-    """Calibrate one alpha_j per lab column on the given (train) partition only.
-
-    driver: length-N array aligned to natural_mask's rows, or None for MCAR
-            (theta is then ignored / forced to 0 for MCAR by convention of the
-            caller passing theta=0.0, driver=zeros).
-    target_rate == 0.0 is handled directly: alpha_j := -inf (no cell is ever
-    injected), satisfying Test 1 (zero-rate identity) exactly, not just
-    approximately.
-    """
+    """Calibrates one alpha per lab column on the given (train) partition only."""
     lab_cols = list(lab_cols)
     eligible_mask = compute_eligible_mask(natural_mask)
 
@@ -242,9 +153,6 @@ def fit_alphas(
             continue
         col_driver = driver[elig]
         if len(col_driver) == 0:
-            # No eligible (natively-observed) cells at all for this column in
-            # this partition -- nothing to calibrate; alpha is irrelevant
-            # since there are no cells to inject into.
             alpha[col] = -np.inf
             continue
         alpha[col] = _bisect_alpha_for_rate(col_driver, theta, target_rate)
@@ -259,15 +167,7 @@ def apply_synthetic_mask(
     rng: np.random.Generator,
     lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS,
 ) -> pd.DataFrame:
-    """Draw the synthetic mask for one partition (train OR test) using an
-    ALREADY-FITTED generator (see fit_alphas). No calibration happens here --
-    this is the fold-safe application step (Test 6).
-
-    Returns a boolean DataFrame, same shape/index as natural_mask[lab_cols],
-    True where a cell is newly synthetically masked. By construction this is
-    always a subset of eligible_mask (synthetic_mask & natural_mask == False
-    holds automatically, since sampling only occurs over eligible cells).
-    """
+    """Draws the synthetic mask for one partition using an already-fitted generator; the fold-safe application step."""
     lab_cols = list(lab_cols)
     eligible_mask = compute_eligible_mask(natural_mask)
 
@@ -286,7 +186,7 @@ def apply_synthetic_mask(
         elig = eligible_mask[col].to_numpy()
         n_elig = int(elig.sum())
         if n_elig == 0 or not np.isfinite(a):
-            continue  # alpha=-inf (q=0 or no eligible cells) -> no injection
+            continue
         p = _sigmoid(a + generator.theta * driver[elig])
         draws = rng.random(n_elig) < p
         col_out = np.zeros(len(natural_mask), dtype=bool)
@@ -299,22 +199,14 @@ def compute_final_mask(natural_mask: pd.DataFrame, synthetic_mask: pd.DataFrame)
     return natural_mask | synthetic_mask
 
 
-# ---------------------------------------------------------------------------
-# High-level per-mechanism entry points
-# ---------------------------------------------------------------------------
-# Every mechanism below returns a CalibratedGenerator (fit on the partition
-# passed in) plus a function-application step identical to apply_synthetic_mask.
-# Splitting fit/apply like this is what makes fold-safety (Test 6) possible:
-# callers fit on outer-train, then re-use the SAME CalibratedGenerator object to
-# apply() on outer-test.
 
 def fit_natural_baseline() -> CalibratedGenerator:
-    """No synthetic injection at all. q is fixed at 0 regardless of caller input."""
+    """No synthetic injection; q is fixed at 0."""
     return CalibratedGenerator(theta=0.0, target_rate=0.0, driver_kind="none", alpha={c: -np.inf for c in ELIGIBLE_LAB_COLS})
 
 
 def fit_mcar(natural_mask: pd.DataFrame, target_rate: float, lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS) -> CalibratedGenerator:
-    """MCAR: theta = 0 (no driver dependence at all) -> P(S=1) = sigmoid(alpha_j) = q for every eligible cell."""
+    """MCAR: constant injection probability with no driver dependence."""
     return fit_alphas(natural_mask, driver=None, theta=0.0, target_rate=target_rate, driver_kind="none", lab_cols=lab_cols)
 
 
@@ -325,13 +217,7 @@ def fit_mar_context(
     target_rate: float,
     lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS,
 ) -> CalibratedGenerator:
-    """MAR-context: driver = H_i computed from admission_type only.
-
-    Signature deliberately takes `admission_type`, NOT `y` / the outcome --
-    this is Test 5 (MAR must not access outcome labels), enforced at the
-    function-signature level: there is no parameter through which a label
-    could even be passed in.
-    """
+    """MAR-context: driver is admission_type-derived only, never the outcome."""
     h_i = compute_H_i(admission_type).to_numpy().astype(float)
     return fit_alphas(natural_mask, driver=h_i, theta=theta, target_rate=target_rate, driver_kind="H_i", lab_cols=lab_cols)
 
@@ -343,18 +229,11 @@ def fit_mnar_y(
     target_rate: float,
     lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS,
 ) -> CalibratedGenerator:
-    """MNAR-Y: driver = Y_i, the outcome itself. Must be fit on outer-TRAIN
-    only and then applied unchanged to outer-TEST (Test 6) -- this function
-    does the fitting half; apply_synthetic_mask does the (fold-safe) other half."""
+    """MNAR-Y: driver is the outcome itself; must be fit on outer-train only."""
     y_arr = y.to_numpy().astype(float)
     return fit_alphas(natural_mask, driver=y_arr, theta=theta, target_rate=target_rate, driver_kind="Y", lab_cols=lab_cols)
 
 
-# ---------------------------------------------------------------------------
-# Convenience: single-partition, single-call generation (used by simple tests
-# and by the manipulation pilot in Phase 2.3; full nested-CV usage fits on
-# train and applies separately to train/test, see module docstring).
-# ---------------------------------------------------------------------------
 
 def generate_mask_single_partition(
     df: pd.DataFrame,
@@ -364,13 +243,7 @@ def generate_mask_single_partition(
     rng: np.random.Generator,
     lab_cols: Iterable[str] = ELIGIBLE_LAB_COLS,
 ) -> Dict[str, pd.DataFrame]:
-    """Fit-and-apply on the SAME partition. Convenient for single-fold pilots
-    and unit tests; NOT fold-safe for a real nested-CV MNAR-Y run (use
-    fit_*() on train + apply_synthetic_mask() on train and test separately
-    for that).
-
-    mechanism in {"natural", "mcar", "mar", "mnar_y"}.
-    """
+    """Fit-and-apply on the same partition; convenient for pilots/unit tests, not fold-safe for a real CV run."""
     natural_mask = compute_natural_mask(df, lab_cols)
 
     if mechanism == "natural":
@@ -399,13 +272,9 @@ def generate_mask_single_partition(
     }
 
 
-# ---------------------------------------------------------------------------
-# Rate bookkeeping (protocol_v2.yaml masking.rate_definitions)
-# ---------------------------------------------------------------------------
 
 def compute_rates(natural_mask: pd.DataFrame, synthetic_mask: pd.DataFrame) -> Dict[str, float]:
-    """r_inject: newly-masked / originally-observed eligible cells.
-    r_total:  all missing (native+injected) / all eligible cells."""
+    """Computes the realized injection rate and total missingness rate."""
     eligible_mask = compute_eligible_mask(natural_mask)
     n_eligible = int(eligible_mask.to_numpy().sum())
     n_injected = int(synthetic_mask.to_numpy().sum())

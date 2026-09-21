@@ -1,14 +1,10 @@
-# Protocol v2.1 — machine-readable config
-# Instantiated for Dataset A (MIMIC-IV v3.1 derived, N=14081, label_mortality prevalence 2.54%)
-# Source: Protocol_v2_1_Experimental_Design_Decisions.md (user-frozen) + phase0_feature_audit.md
-
 outcome:
   name: label_mortality
   prevalence: 0.02542
   n_total: 14081
   n_positive: 358
-  prediction_landmark: "first 24 hours of admission"   # user-confirmed default (no ETL doc in DASA2026 states this explicitly)
-  lab_observation_window: "first 24 hours of admission"  # same basis as prediction_landmark, per user confirmation
+  prediction_landmark: "first 24 hours of admission"
+  lab_observation_window: "first 24 hours of admission"
 
 split:
   outer: StratifiedGroupKFold
@@ -16,7 +12,7 @@ split:
   group: subject_id
   fixed_split: true
   sklearn_min_version: "0.24"
-  legacy_sensitivity_split: StratifiedKFold   # old "S1", demoted to sensitivity-only
+  legacy_sensitivity_split: StratifiedKFold
   legacy_sensitivity_split_note: "no patient separation — do not use as headline result"
 
 feature_groups:
@@ -64,11 +60,11 @@ feature_groups:
     - anchor_year_group
   excluded_from_model_entirely:
     - hadm_id
-    - subject_id            # split-group key only
-    - discharge_location    # post-index; near-1:1 proxy for label (353/358 positives == "DIED")
+    - subject_id
+    - discharge_location
 
 masking:
-  eligible_cells: originally_observed_only    # mask only where native value is non-null
+  eligible_cells: originally_observed_only
   rate_definitions:
     r_inject: "newly-masked cells / originally-observed eligible cells (target, calibrated)"
     r_total: "all missing cells (native + injected) / all eligible cells (realized, reported alongside r_inject)"
@@ -94,55 +90,40 @@ mar:
       - "DIRECT OBSERVATION"
       - "AMBULATORY OBSERVATION"
   driver_derivation_basis: "mean count of 30 lab_* columns observed per admission_type (X-side only, label never used)"
-  optional_secondary_driver: admission_location   # not used in main experiment
+  optional_secondary_driver: admission_location
   uses_outcome: false
   generator_form: "P(S_ij=1) = sigmoid(alpha_j + theta * H_i)"
-  theta: 0.693147   # ln(2), OR=2 — user-confirmed, matches MNAR-Y main effect size
+  theta: 0.693147
 
 mnar_y:
   generator_form: "P(S_ij=1 | Y_i) = sigmoid(alpha_j + theta * Y_i)"
   main_or: 2.0
-  main_theta: 0.693147  # ln(2)
+  main_theta: 0.693147
   sensitivity_or: [1.5, 2.0, 4.0]
-  extreme_stress_or: 8.0   # optional, not main sensitivity
-  strength_sweep_fixed_rate: 0.3   # q held fixed while OR varies
+  extreme_stress_or: 8.0
+  strength_sweep_fixed_rate: 0.3
 
 mnar_x:
-  status: implemented    # NOT implemented in Phase 2 per Protocol (correctly deferred there); implemented and
-                          # run to completion as part of item 11 (Phase 8, Part 1 of 3), NOT alongside RQ4/Phase 6
-                          # as an earlier version of this comment stated. See run_phase8_mnar_x.py,
-                          # Supplementary_mnarx-driver-implementation.md, and Supplementary_item11-sensitivity-results-mnarx-calibration-s1.md §1 for the driver, design
-                          # rationale, and results. Resolved parameters (see Supplementary_mnarx-driver-implementation.md for the
-                          # full derivation): GAMMA_MAIN = ln(2)/2 (OR=2.0 at the |z|=2 reference point, chosen
-                          # for direct comparability with MAR/MNAR-Y's own OR grid), z_clip = 5.0 (safeguard:
-                          # 4/30 real lab columns have native |z| in the 40-50 range, which underflows unclipped
-                          # masking probability to ~0). generator_form: "P(S_ij=1) = sigmoid(alpha_j + gamma * |z_ij|_clipped)",
-                          # X-side only (no outcome dependence, unlike MNAR-Y), rate grid q in {0.10,0.20,0.30,0.40}
-                          # main + OR sweep {1.5, 2.0(main), 4.0} at q=0.30, mirroring MNAR-Y's own sweep for
-                          # direct comparability. mnar_x_q00 reuses Phase 4's natural_q00 checkpoint (identical
-                          # at q=0 since no injection occurs), consistent with the other three mechanisms' own
-                          # q=0 reuse convention.
+  status: implemented
 
 selection:
-  outer_test_selects_family: false   # ACHIEVED as of Phase 3 (selection_v2.py). The OLD pipeline's compute_winners()
-                                      # was confirmed to violate this (picked the family with best MEAN OUTER-TEST
-                                      # AUROC across folds) -- fixed and validated end-to-end; see History_selection-integrity-bug-fix.md
+  outer_test_selects_family: false
   procedure: "inner grouped CV on outer-train -> tune each family -> select family from inner CV only -> refit -> outer test once (evaluation only)"
-  implementation: selection_v2.py::select_family() + run_outer_fold()   # Phase 3 deliverable
+  implementation: selection_v2.py::select_family() + run_outer_fold()
 
 metrics:
   primary_selection_criterion: AUROC
   secondary: [average_precision]
   calibration_primary: [slope, intercept]
   calibration_secondary: [ece]
-  rank_correlation: kendall_tau_b   # spearman dropped
+  rank_correlation: kendall_tau_b
   new_metrics:
     - selection_regret
     - baseline_selection_displacement_rate
     - within_condition_selection_entropy
 
 pilot:
-  status: executed   # see Supplementary_manipulation-check-pilot.md for full results/verdict
+  status: executed
   n_outer_folds: 1
   n_mask_seeds: 1
   rates: [0.1, 0.3, 0.5]

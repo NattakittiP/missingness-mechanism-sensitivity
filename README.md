@@ -5,18 +5,17 @@ Code and results for a study of how the **mechanism** of missing data — not ju
 ## Headline findings
 
 - **RQ1 (mechanism vs. selection stability)**: at a matched injected missingness rate, outcome-independent mechanisms (MCAR, MAR) progressively destabilize which model family gets selected (MCAR reaches 80% selection displacement by q=0.4), while outcome-dependent missingness (MNAR-Y) never displaces the selected family, at any rate tested.
-- **RQ2 (MNAR-Y strength)**: AUROC rises monotonically with MNAR-Y strength, but this is largely a shortcut-learning signature, not a genuine improvement in predictive power — confirmed directly by RQ4.
+- **RQ2 (MNAR-Y strength)**: AUROC rises monotonically with MNAR-Y strength; RQ4's permutation-ablation evidence shows part of this gain is a shortcut-learning signature rather than a genuine improvement in predictive power, though the size of that shortcut contribution is itself strongly strength-dependent — small at the main strength and much larger at a higher sensitivity setting (see RQ4 below).
 - **RQ3 (deployment shift)**: a model trained under MCAR/MAR loses about twice as much raw AUROC when deployed where missingness is actually MNAR-Y (~−0.030) as the reverse (~−0.016 to −0.017) — but the *selection* decision breaks the other way: a model selected under MNAR-Y is never the correct choice once deployed under MCAR/MAR (100% displacement).
 - **RQ4 (shortcut attribution)**: destroying the missingness pattern at test time (permuting which labs are "missing," holding values and model fixed) costs the model ~1 AUROC point at the frozen main MNAR-Y strength, but 9–11 AUROC points at a stronger sensitivity setting — direct, quantitative evidence that the model is partly reading the missingness pattern itself as a proxy for the outcome, and that this effect is highly strength-dependent.
 
-Full results, figures, and caveats: see `docs/`.
+Full results and caveats: see `docs/`.
 
 ## Repository structure
 
 ```
 code/           Every driver and shared module actually run to produce the results,
-                organized by phase (see "Reproducing the pipeline" below). code/FIGURES/
-                regenerates all 7 result figures from the production result tables.
+                organized by phase (see "Reproducing the pipeline" below).
 docs/           Methodology and results write-ups (start at docs/README.md).
 protocol_v2.yaml     Frozen, machine-readable experimental configuration.
 feature_manifest.csv Per-feature table: type, native missingness %, masking eligibility.
@@ -41,10 +40,9 @@ Each `PHASE_*` subfolder is self-contained and corresponds to one stage of the p
 | `PHASE_8_MNAR_X/` | MNAR-X (value-dependent missingness) sensitivity experiment. |
 | `PHASE_8_S1_SENSITIVITY/` | Legacy-split (no patient separation) sensitivity check. |
 | `PHASE_STATS_LAYER/` | Driver-independent statistical-significance layer (paired fold-level tests, bootstrap CIs) computed directly from the result tables above. |
-| `CASE_LEVEL_BOOTSTRAP_CI/` | Case-level (patient-level) bootstrap confidence intervals on headline AUROC/AP, computed from saved per-case predictions. |
-| `FIGURES/` | Regenerates all 7 result figures from the production result tables. |
+| `CASE_LEVEL_BOOTSTRAP_CI/` | Case-level (admission-level) bootstrap confidence intervals on headline AUROC/AP, computed from saved per-case predictions. |
 
-**Why each phase folder carries its own copy of the shared modules**: `missingness_generator_v2.py`, `selection_v2.py`, and `metrics_v2.py` evolved slightly across the project (bug fixes, refactors, added functionality). Each folder's copy is exactly the version that was actually imported when that phase's results were produced. This is deliberate, not duplication left in by accident — it guarantees that running any driver in this repository reproduces the results reported in `docs/`, without depending on a module version from a different phase of the project. `PHASE_4_RQ1_RQ2/` and `PHASE_8_CALIBRATION/` additionally vendor `jcsse_audit_runner_tqdm_hardened.py`, a large model-training/preprocessing utility module inherited from an earlier, unrelated project; only a handful of its functions (model definitions, the preprocessing pipeline, calibrated-probability prediction) are actually used by `selection_v2.py`, but it is included byte-for-byte unmodified — the same file that was actually imported at run time — rather than manually extracted, to eliminate any risk of a reproduction discrepancy.
+**Why each phase folder carries its own copy of the shared modules**: `missingness_generator_v2.py`, `selection_v2.py`, and `metrics_v2.py` evolved slightly across the project (bug fixes, refactors, added functionality). Each folder's copy is exactly the version that was actually imported when that phase's results were produced. This is deliberate, not duplication left in by accident — it guarantees that running any driver in this repository reproduces the results reported in `docs/`, without depending on a module version from a different phase of the project. Every folder that uses `selection_v2.py` also vendors `base_model_runner.py`, a large model-training/preprocessing utility module inherited from an earlier, unrelated project; only a handful of its functions (model definitions, the preprocessing pipeline, calibrated-probability prediction) are actually used by `selection_v2.py`, but it is included byte-for-byte unmodified — the same file that was actually imported at run time — rather than manually extracted, to eliminate any risk of a reproduction discrepancy.
 
 ## Reproducing the pipeline
 
@@ -82,7 +80,7 @@ cd code/PHASE_STATS_LAYER && python phase_stats_layer.py --data-root /path/to/pr
 
 ## Data access
 
-The analytic dataset used in this study (`full_analytic_dataset_mortality_all_admissions.csv`, N=14,081 admissions) is **not included** in this repository. MIMIC-IV is a restricted dataset governed by the PhysioNet Data Use Agreement, and per that agreement no derived patient-level data is redistributed here.
+The analytic dataset used in this study (`full_analytic_dataset_mortality_all_admissions.csv`, N=14,081 admissions) is **not included** in this repository. MIMIC-IV is a restricted dataset governed by the PhysioNet Data Use Agreement, and per that agreement no derived admission-level data is redistributed here.
 
 **To obtain access:**
 
@@ -97,16 +95,9 @@ The analytic dataset used in this study (`full_analytic_dataset_mortality_all_ad
 - Label column: `label_mortality` (binary; 1 = in-hospital death)
 - Group column: `subject_id` (used for the `StratifiedGroupKFold` split)
 - Features: `age`, `gender`, `race`, `marital_status`, `admission_type`, `anchor_year_group`, `anchor_age`, `anchor_year`, `admission_location`, `insurance`, plus 30 laboratory/vital-sign columns (`lab_*`)
-- Prediction landmark and lab-observation window: first 24 hours of admission
+- Prediction landmark and lab-observation window: first 24 hours of admission (adopted analysis convention for this study)
 
 See `feature_manifest.csv` for the full per-feature table (type, native missingness %, model-input status, masking eligibility), and `docs/methodology.md` for how features are used. Every driver under `code/` accepts a `--data-path` argument pointing at your local copy of the analytic CSV once you have built it — see "Reproducing the pipeline" above.
-
-## What's not in this repository, and why
-
-- **The MIMIC-IV-derived dataset and any per-patient/per-fold model outputs** (predictions, fitted-model checkpoints, raw per-fold result pickles). MIMIC-IV is a restricted dataset under the PhysioNet Data Use Agreement, which does not permit redistribution of the data or of artifacts derived from it at patient-level granularity. Only code and aggregate, already-summarized results (the tables in `docs/`, regenerable from those tables) are published here.
-- **The internal audit-trail documentation** — implementation notes and independent-recheck write-ups produced during development. These are working documents, not results; the main methodology and findings they led to are in `docs/`. Available on request.
-- **Two third-party PDFs** used as related-work references during drafting, and their bibliography. Full citations for all related work are maintained separately, outside this repository.
-- **Earlier, superseded exploratory code** from before the final `PHASE_2`–`PHASE_8` pipeline was designed. It used different data-handling and evaluation conventions and does not correspond to any result reported here; keeping it out of the release avoids any ambiguity about which code produced these results.
 
 ## License
 
