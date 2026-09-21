@@ -1,6 +1,6 @@
 # Missingness-Mechanism Sensitivity in Mortality Prediction
 
-Code and results for a study of how the **mechanism** of missing data — not just its rate — affects model-family selection stability, deployment robustness, and shortcut learning in an in-hospital mortality prediction task on MIMIC-IV.
+Code and results for a study of how the mechanism of missing data, not just its rate, affects model-family selection stability, deployment robustness, and shortcut learning in an in-hospital mortality prediction task on MIMIC-IV.
 
 ## Headline findings
 
