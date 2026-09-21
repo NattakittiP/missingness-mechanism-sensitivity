@@ -1,6 +1,6 @@
 # Missingness-Mechanism Sensitivity in Mortality Prediction
 
-Code and results for a study of how the **mechanism** of missing data — not just its rate — affects model-family selection stability, deployment robustness, and shortcut learning in an in-hospital mortality prediction task on MIMIC-IV.
+Code and results for a study of how the mechanism of missing data, not just its rate, affects model-family selection stability, deployment robustness, and shortcut learning in an in-hospital mortality prediction task on MIMIC-IV.
 
 ## Headline findings
 
@@ -17,7 +17,6 @@ Full results and caveats: see `docs/`.
 code/           Every driver and shared module actually run to produce the results,
                 organized by phase (see "Reproducing the pipeline" below).
 docs/           Methodology and results write-ups (start at docs/README.md).
-protocol_v2.yaml     Frozen, machine-readable experimental configuration.
 feature_manifest.csv Per-feature table: type, native missingness %, masking eligibility.
 ```
 
@@ -98,6 +97,7 @@ The analytic dataset used in this study (`full_analytic_dataset_mortality_all_ad
 - Prediction landmark and lab-observation window: first 24 hours of admission (adopted analysis convention for this study)
 
 See `feature_manifest.csv` for the full per-feature table (type, native missingness %, model-input status, masking eligibility), and `docs/methodology.md` for how features are used. Every driver under `code/` accepts a `--data-path` argument pointing at your local copy of the analytic CSV once you have built it — see "Reproducing the pipeline" above.
+
 
 ## License
 
