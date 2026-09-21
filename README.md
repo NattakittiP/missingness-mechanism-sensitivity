@@ -15,10 +15,8 @@ Full results, figures, and caveats: see `docs/`.
 
 ```
 code/           Every driver and shared module actually run to produce the results,
-                organized by phase (see "Reproducing the pipeline" below). code/FIGURES/
-                regenerates all 7 result figures from the production result tables.
+                organized by phase (see "Reproducing the pipeline" below).
 docs/           Methodology and results write-ups (start at docs/README.md).
-protocol_v2.yaml     Frozen, machine-readable experimental configuration.
 feature_manifest.csv Per-feature table: type, native missingness %, masking eligibility.
 ```
 
@@ -42,7 +40,6 @@ Each `PHASE_*` subfolder is self-contained and corresponds to one stage of the p
 | `PHASE_8_S1_SENSITIVITY/` | Legacy-split (no patient separation) sensitivity check. |
 | `PHASE_STATS_LAYER/` | Driver-independent statistical-significance layer (paired fold-level tests, bootstrap CIs) computed directly from the result tables above. |
 | `CASE_LEVEL_BOOTSTRAP_CI/` | Case-level (patient-level) bootstrap confidence intervals on headline AUROC/AP, computed from saved per-case predictions. |
-| `FIGURES/` | Regenerates all 7 result figures from the production result tables. |
 
 **Why each phase folder carries its own copy of the shared modules**: `missingness_generator_v2.py`, `selection_v2.py`, and `metrics_v2.py` evolved slightly across the project (bug fixes, refactors, added functionality). Each folder's copy is exactly the version that was actually imported when that phase's results were produced. This is deliberate, not duplication left in by accident — it guarantees that running any driver in this repository reproduces the results reported in `docs/`, without depending on a module version from a different phase of the project. `PHASE_4_RQ1_RQ2/` and `PHASE_8_CALIBRATION/` additionally vendor `jcsse_audit_runner_tqdm_hardened.py`, a large model-training/preprocessing utility module inherited from an earlier, unrelated project; only a handful of its functions (model definitions, the preprocessing pipeline, calibrated-probability prediction) are actually used by `selection_v2.py`, but it is included byte-for-byte unmodified — the same file that was actually imported at run time — rather than manually extracted, to eliminate any risk of a reproduction discrepancy.
 
@@ -101,12 +98,6 @@ The analytic dataset used in this study (`full_analytic_dataset_mortality_all_ad
 
 See `feature_manifest.csv` for the full per-feature table (type, native missingness %, model-input status, masking eligibility), and `docs/methodology.md` for how features are used. Every driver under `code/` accepts a `--data-path` argument pointing at your local copy of the analytic CSV once you have built it — see "Reproducing the pipeline" above.
 
-## What's not in this repository, and why
-
-- **The MIMIC-IV-derived dataset and any per-patient/per-fold model outputs** (predictions, fitted-model checkpoints, raw per-fold result pickles). MIMIC-IV is a restricted dataset under the PhysioNet Data Use Agreement, which does not permit redistribution of the data or of artifacts derived from it at patient-level granularity. Only code and aggregate, already-summarized results (the tables in `docs/`, regenerable from those tables) are published here.
-- **The internal audit-trail documentation** — implementation notes and independent-recheck write-ups produced during development. These are working documents, not results; the main methodology and findings they led to are in `docs/`. Available on request.
-- **Two third-party PDFs** used as related-work references during drafting, and their bibliography. Full citations for all related work are maintained separately, outside this repository.
-- **Earlier, superseded exploratory code** from before the final `PHASE_2`–`PHASE_8` pipeline was designed. It used different data-handling and evaluation conventions and does not correspond to any result reported here; keeping it out of the release avoids any ambiguity about which code produced these results.
 
 ## License
 
