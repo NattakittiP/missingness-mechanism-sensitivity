@@ -19,3 +19,8 @@ Thumbs.db
 .venv/
 venv/
 env/
+
+Results/
+Dataset/
+*_smoke/
+leakage_artifacts/

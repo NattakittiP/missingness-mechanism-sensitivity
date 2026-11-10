@@ -1,9 +1,11 @@
-numpy>=1.24
-pandas>=1.5
-scikit-learn>=1.8
-xgboost>=1.7
+# Versions recorded in the run logs (Python 3.13.3)
+numpy==2.2.5
+pandas==3.0.2
+scikit-learn==1.8.0
+xgboost==3.2.0
+# Used by the analysis, statistics and figure scripts (versions not recorded in the logs)
 scipy>=1.10
 statsmodels>=0.14
-tqdm>=4.65
-
+matplotlib>=3.8
 pytest>=7.0
+tqdm>=4.65  # optional progress bars
